@@ -175,6 +175,8 @@ def _count_active_sessions() -> int:
 _reap_dead_locks()
 _SESSION_LOCK_FILE.write_text(str(_PID), encoding="utf-8")
 
+_session_announced = False  # written True after the first successful heartbeat
+
 
 def _open_remote(timeout: float) -> tuple[RemoteExecution, str] | None:
     """Discover UE and open a command connection. Returns (remote, node_id) or None."""
@@ -200,6 +202,7 @@ def _open_remote(timeout: float) -> tuple[RemoteExecution, str] | None:
 
 def _try_heartbeat() -> None:
     """Update UE-side heartbeat/node-ID state. Skips silently if mutex unavailable."""
+    global _session_announced
     if not _acquire_ue_mutex(timeout_ms=100):
         return
     try:
@@ -215,6 +218,10 @@ def _try_heartbeat() -> None:
                 f"    unreal.RemoteExecutionBridgeLibrary.set_connected_cwd({json.dumps(_CWD)})\n"
                 f'    unreal.RemoteExecutionBridgeLibrary.set_connected_start_time("{_START_TIME}")\n'
             ) if active == 1 else ""
+            announce_line = (
+                'print("[MCP] ue_remote_execution_bridge server connected")\n'
+                if not _session_announced else ""
+            )
             code = (
                 "import unreal\n"
                 "try:\n"
@@ -224,8 +231,10 @@ def _try_heartbeat() -> None:
                 + session_lines
                 + "except AttributeError:\n"
                 "    pass\n"
+                + announce_line
             )
             remote.run_command(code, unattended=True, exec_mode=MODE_EXEC_FILE, raise_on_failure=False)
+            _session_announced = True
         finally:
             try:
                 remote.stop()
