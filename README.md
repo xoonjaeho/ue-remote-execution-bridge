@@ -46,7 +46,7 @@ Open `<YourProject>/Config/DefaultEngine.ini` and append the entire contents of 
 Add these entries to the `Plugins` array in `<YourProject>/<YourProject>.uproject`:
 
 ```json
-{ "Name": "RemoteExecutionBridge",     "Enabled": true },
+{ "Name": "RemoteExecutionBridge",     "Enabled": true, "SupportedTargetPlatforms": ["Win64"] },
 { "Name": "PythonScriptPlugin",        "Enabled": true },
 { "Name": "EditorScriptingUtilities",  "Enabled": true }
 ```
