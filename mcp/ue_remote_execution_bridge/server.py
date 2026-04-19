@@ -36,7 +36,7 @@ def _resolve_log_path() -> Path:
 
     Resolution order (first match wins):
     1. UE_PROJECT_ROOT env var — a directory containing a *.uproject file.
-    2. Walk upward from this file (up to 6 levels) looking for a *.uproject.
+    2. Walk upward from this file (up to 7 levels) looking for a *.uproject.
     3. Fallback to parents[2] for the mirrored in-repo layout
        (<UEProject>/mcp/ue_remote_execution_bridge/server.py → <UEProject>).
     """

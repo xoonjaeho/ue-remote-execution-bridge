@@ -71,7 +71,7 @@ The path in `args` is relative to the directory Claude Code is launched from (yo
 Finally, install the Python dependency:
 
 ```
-pip install -r mcp/ue_remote_execution_bridge/requirements.txt
+pip install -r requirements.txt
 ```
 
 ## Verify
