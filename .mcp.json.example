@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ue_remote_execution_bridge": {
+      "command": "python",
+      "args": ["mcp/ue_remote_execution_bridge/server.py"]
+    }
+  }
+}

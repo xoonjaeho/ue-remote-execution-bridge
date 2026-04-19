@@ -1,0 +1,19 @@
+NOTICE
+
+This software includes the following third-party component:
+
+  mcp/ue_remote_execution_bridge/execute.py
+  Copyright Epic Games, Inc. All Rights Reserved.
+  Original file: <UE>/Engine/Plugins/Experimental/PythonScriptPlugin/Content/Python/remote_execution.py
+  Source: Unreal Engine (https://www.unrealengine.com)
+
+  This file is a verbatim copy of the Epic Games file listed above, renamed from
+  remote_execution.py to execute.py solely to avoid an import-path collision with
+  the enclosing Python package (mcp.ue_remote_execution_bridge.remote_execution).
+  No source modifications were made to the file's content.
+
+  Use of this file is governed by the Unreal Engine End User License Agreement
+  (https://www.unrealengine.com/eula). A valid Unreal Engine license is required.
+
+All other files in this repository are original work and are licensed under the
+MIT License. See LICENSE.

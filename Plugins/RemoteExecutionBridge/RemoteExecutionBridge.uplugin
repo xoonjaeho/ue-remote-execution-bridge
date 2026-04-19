@@ -1,0 +1,34 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"EngineVersion": "5.7.0",
+	"FriendlyName": "Remote Execution Bridge",
+	"Description": "Exposes C++ editor APIs to Python and shows MCP Remote Execution connection status in the Play toolbar.",
+	"Category": "Tools",
+	"CreatedBy": "xoonjaeho",
+	"CreatedByURL": "https://github.com/xoonjaeho/ue-remote-execution-bridge",
+	"DocsURL": "https://github.com/xoonjaeho/ue-remote-execution-bridge#readme",
+	"SupportURL": "https://github.com/xoonjaeho/ue-remote-execution-bridge/issues",
+	"SupportedTargetPlatforms": ["Win64"],
+	"CanContainContent": false,
+	"Installed": false,
+	"Plugins": [
+		{
+			"Name": "PythonScriptPlugin",
+			"Enabled": true
+		}
+	],
+	"Modules": [
+		{
+			"Name": "RemoteExecutionBridge",
+			"Type": "UncookedOnly",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "RemoteExecutionBridgeEditor",
+			"Type": "Editor",
+			"LoadingPhase": "PostEngineInit"
+		}
+	]
+}
