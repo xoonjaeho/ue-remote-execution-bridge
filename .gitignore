@@ -1,0 +1,21 @@
+# Unreal Engine build artifacts
+**/Binaries/
+**/Intermediate/
+**/DerivedDataCache/
+**/Saved/
+*.sln
+*.suo
+*.user
+
+# Python artifacts
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# MCP server runtime files
+mcp/ue_remote_execution_bridge/usage.log
+mcp/ue_remote_execution_bridge/.sessions/
+
+# IDE and editor directories
+.vs/
+.idea/
