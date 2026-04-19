@@ -151,7 +151,7 @@ A resident MCP server process **maintains** the TCP session with UE and exposes 
 
 - **Advantages**
   - Claude recognizes tool schemas → parameter validation, auto-suggestions, consistent calling convention.
-  - Connection reuse → discovery once, subsequent calls in milliseconds.
+  - Per-call connect latency is ~100–200 ms (UDP discovery + TCP handshake); connection reuse is a planned future optimization.
   - Results can be processed server-side — long log tails, error formatting, context savings.
   - State is preserved (Python global scope, recent error cache, subscriptable log streams).
   - Features requiring a persistent connection (e.g., real-time PIE log tailing) are natural to implement.
@@ -209,7 +209,7 @@ The primary use case is Claude **iteratively** controlling UE. The benefits of c
 ```
 
 - Claude Code launches the `ue_remote_execution_bridge` server registered in `.mcp.json` via stdio.
-- The server performs UDP discovery on the first request → TCP connect → reuses the session thereafter.
+- Each tool call opens a fresh UDP discovery + TCP handshake and closes the connection when the call completes. Connection reuse is deferred to a later revision.
 - If the editor restarts, the server re-discovers and reconnects transparently.
 - UFUNCTIONs called via `unreal.*` inside `run_python` are registered by `Plugins/RemoteExecutionBridge/` — when the Python API reaches its limits, extend this plugin (→ 4.7).
 
@@ -325,13 +325,15 @@ The path in `args` is relative to the directory Claude Code is launched from (yo
 The server opens a TCP session with UE at two points:
 
 1. **Eager connect** — one discovery at server startup with `DISCOVERY_TIMEOUT=2s`. Connects immediately if the editor is running; skips silently otherwise.
-2. **Lazy connect** — discovery at the first tool call (`timeout=5s`). The TCP session is reused until it drops.
+2. **Per-call connect** — each tool call opens a fresh UDP discovery (`timeout=5s`) + TCP handshake and closes the connection on exit (~100–200 ms overhead). Connection reuse is deferred to a later revision.
 
-Immediately after a new TCP session opens, `_notify_connected()` fires as a fire-and-forget call that writes a single line to the editor Output Log:
+The first successful heartbeat writes a single line to the editor Output Log:
 
 ```
 LogPython: [MCP] ue_remote_execution_bridge server connected
 ```
+
+Subsequent heartbeats and tool calls produce no Output Log notification (spam prevention).
 
 **Viewport on-screen toasts were not adopted.** `unreal.SystemLibrary.print_string(..., print_to_screen=True)` goes through GEngine's `AddOnScreenDebugMessage` path, which only renders during PIE/Standalone world rendering — invisible when the editor is idle. Slate-native notifications (`FNotificationInfo` bottom-right toast) are not exposed in the UE 5.7 Python API — this limitation was one of the triggers for introducing `Plugins/RemoteExecutionBridge/`.
 
@@ -339,8 +341,8 @@ The current approach combines an editor toolbar badge (`SRemoteExecutionStatusBa
 
 Reconnect behavior:
 
-- Session reuse produces no notification (spam prevention).
-- If the TCP session drops, the next tool call retries once → re-discovers → logs the connected message again on a new session.
+- `_session_announced` is a module-level flag — it resets only when the MCP server process itself restarts. If the UE editor restarts while the server is running, the announcement is not repeated.
+- If the editor is unreachable, tool calls return an error immediately.
 
 ### 4.7 C++ Plugin Surface (RemoteExecutionBridge)
 
