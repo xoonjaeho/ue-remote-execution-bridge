@@ -226,15 +226,16 @@ def _try_heartbeat() -> None:
                 "import unreal\n"
                 "try:\n"
                 "    unreal.RemoteExecutionBridgeLibrary.heartbeat()\n"
-                f'    unreal.RemoteExecutionBridgeLibrary.set_connected_node_id("{node_id}")\n'
+                f"    unreal.RemoteExecutionBridgeLibrary.set_connected_node_id({json.dumps(node_id)})\n"
                 f"    unreal.RemoteExecutionBridgeLibrary.set_active_sessions({active})\n"
                 + session_lines
                 + "except AttributeError:\n"
                 "    pass\n"
                 + announce_line
             )
-            remote.run_command(code, unattended=True, exec_mode=MODE_EXEC_FILE, raise_on_failure=False)
-            _session_announced = True
+            cmd_result = remote.run_command(code, unattended=True, exec_mode=MODE_EXEC_FILE, raise_on_failure=False)
+            if not _session_announced and cmd_result.get("success"):
+                _session_announced = True
         finally:
             try:
                 remote.stop()
@@ -283,7 +284,7 @@ def _ue_connection() -> Generator[RemoteExecution, None, None]:
             remote.run_command(
                 "import unreal\n"
                 "try:\n"
-                f'    unreal.RemoteExecutionBridgeLibrary.set_connected_node_id("{node_id}")\n'
+                f"    unreal.RemoteExecutionBridgeLibrary.set_connected_node_id({json.dumps(node_id)})\n"
                 f"    unreal.RemoteExecutionBridgeLibrary.set_connected_pid({_PID})\n"
                 f"    unreal.RemoteExecutionBridgeLibrary.set_connected_ppid({_PPID})\n"
                 f"    unreal.RemoteExecutionBridgeLibrary.set_connected_cwd({json.dumps(_CWD)})\n"

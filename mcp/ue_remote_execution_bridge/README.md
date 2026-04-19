@@ -72,9 +72,9 @@ The MCP server starts regardless of whether the editor is running — if the edi
 ## Connection Lifecycle
 
 - **Eager connect**: 2-second discovery on server startup. Connects immediately if the editor is running; skips silently otherwise.
-- **Lazy connect**: 5-second discovery on the first tool call. Reuses the TCP session afterward.
-- A single `[MCP] ue_remote_execution_bridge server connected` line is written to the editor Output Log when a new session is established (not repeated on reuse, to avoid spam).
-- If the TCP connection drops, the next call retries once then re-discovers.
+- **Per-call connect**: Each tool call opens a fresh UDP discovery + TCP handshake (~100–200 ms overhead) and closes the connection when the call completes. Connection reuse is deferred to a later revision.
+- A single `[MCP] ue_remote_execution_bridge server connected` line is written to the editor Output Log on the first successful heartbeat (not repeated per tool call, to avoid spam).
+- If the editor is not reachable, the call returns an error immediately.
 
 ## Troubleshooting
 
