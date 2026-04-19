@@ -21,7 +21,6 @@ public class RemoteExecutionBridgeEditor : ModuleRules
 			"ToolMenus",
 			"LevelEditor",
 			"Projects",
-			"InputCore",
 			"RemoteExecutionBridge",
 			"BlueprintGraph",
 			"Kismet",
