@@ -97,7 +97,7 @@ FText SRemoteExecutionStatusBadge::GetTooltipText() const
 	const FString SessionsStr = FString::Printf(TEXT("%d"), FMath::Max(1, ActiveSessions));
 
 	return FText::FromString(FString::Printf(
-		TEXT("Remote Execution Bridge\nStatus: %s\nSessions: %s\nHeartbeat: %s\nNode: %s\nPID     : %s\nStarted : %s\nProject : %s\nEndpoint: %s\nTTL: %s"),
+		TEXT("Remote Execution Bridge\nStatus: %s\nSessions: %s\nHeartbeat: %s\nNode: %s\nPID: %s\nStarted: %s\nProject: %s\nEndpoint: %s\nTTL: %s"),
 		*StatusStr,
 		*SessionsStr,
 		*TimeStr,
