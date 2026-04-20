@@ -68,7 +68,19 @@ DISCOVERY_TIMEOUT = 5.0
 EAGER_DISCOVERY_TIMEOUT = 2.0
 MAX_TAIL_BYTES = 256 * 1024
 
-mcp = FastMCP("ue_remote_execution_bridge")
+_INSTRUCTIONS = """\
+Runs Python inside a live Unreal Editor 5.7 via PythonScriptPlugin Remote Execution.
+
+- The editor must be running. On `No Unreal Editor discovered within 5s`, stop and ask the user to launch it — do not retry in a loop.
+- `run_python` code is appended to `usage.log` in plaintext. Never pass credentials through `code`.
+- After any asset mutation, call `tail_output_log` with the previous `next_offset` to confirm side-effects. Silent success is not success.
+
+When `unreal.*` lacks a symbol (typical sign: `AttributeError: module 'unreal' has no attribute …`), the companion C++ plugin `Plugins/RemoteExecutionBridge/` shipped with this MCP is the intended extension path — add a `UFUNCTION`, rebuild, call as `unreal.<Class>.<method>(...)`. Don't spend more than two pure-Python workarounds on the same goal. Catalog + recipe: `mcp/ue_remote_execution_bridge/README.md §C++ Plugin Extension`.
+
+Deeper reference: `mcp/ue_remote_execution_bridge/README.md`, `docs/DESIGN.md`, `docs/CHEATSHEET.md`.
+"""
+
+mcp = FastMCP("ue_remote_execution_bridge", instructions=_INSTRUCTIONS)
 
 _PID = os.getpid()
 _PPID = os.getppid()

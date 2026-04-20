@@ -11,6 +11,18 @@ There is exactly one practical channel for driving Python from outside UE: the *
 
 > In this document "Remote Execution" refers only to this PythonScriptPlugin feature — do not confuse it with the separate **Remote Control** plugin.
 
+### 1.1 Naming map
+
+This project ships two cooperating halves under three related names — all point at the same system. See the [repo root README §How it works](../../../README.md#how-it-works) for the end-to-end data flow.
+
+| Name | Kind | Where |
+|---|---|---|
+| `ue-remote-execution-bridge` | Repo / MCP server id (`.mcp.json`) | This repo, `mcp/ue_remote_execution_bridge/server.py` |
+| `RemoteExecutionBridge`, `RemoteExecutionBridgeEditor` | C++ UE modules | `Plugins/RemoteExecutionBridge/Source/` |
+| `unreal.RemoteExecutionBridgeLibrary` (and `…EditorUtilityLibrary` siblings) | Python bindings generated from the C++ UFUNCTIONs | Called from `run_python` payloads |
+
+The C++ plugin is also the designed **Python API escape hatch** — when `unreal.*` lacks a symbol, add a UFUNCTION. See §4.7 and [mcp README §C++ Plugin Extension](../README.md#c-plugin-extension-python-api-escape-hatch).
+
 ---
 
 ## 2. Remote Execution Protocol

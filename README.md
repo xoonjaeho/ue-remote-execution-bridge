@@ -1,6 +1,11 @@
 # ue-remote-execution-bridge
 
-Drop-in template that exposes Unreal Engine 5.7's PythonScriptPlugin Remote Execution as MCP tools, with a companion C++ plugin that adds a live connection-status badge to the editor toolbar and exposes editor-internal APIs (Blueprint graph manipulation, Material expression access) to Python.
+One integrated system in two cooperating halves:
+
+- **Python MCP server** — exposes UE 5.7's PythonScriptPlugin Remote Execution as MCP tools so Claude can run Python inside the editor, control PIE, and tail the Output Log.
+- **C++ UE plugin** — shows live connection state on the editor toolbar, and serves as a Python-API escape hatch: when `unreal.*` lacks a symbol (Blueprint graph manipulation, Material expression access, etc.), add a `UFUNCTION` and call it from Python.
+
+Both halves ship together and are designed to be used together.
 
 ## What's in the box
 
@@ -11,7 +16,36 @@ Drop-in template that exposes Unreal Engine 5.7's PythonScriptPlugin Remote Exec
 | `Config/DefaultEngine.ini.snippet` | Engine settings block to append to your project's `DefaultEngine.ini`. |
 | `.mcp.json.example` | MCP registration template to copy to your project root as `.mcp.json`. |
 
-**Both halves work independently.** Installing only the Python server gives you all four MCP tools (`run_python`, `start_pie`, `stop_pie`, `tail_output_log`) without a toolbar badge. Installing only the C++ plugin gives you the badge (red until a server connects) and the extended UFUNCTIONs without MCP tooling.
+Each half is installable alone (Python server only → four MCP tools, no badge; C++ plugin only → badge + UFUNCTIONs, no MCP), but installing both is the default and intended setup.
+
+## How it works
+
+```
+Claude Code (MCP client)
+      │  stdio
+      ▼
+mcp/ue_remote_execution_bridge/server.py   ── Python MCP server (this repo)
+      │  UDP 6766 discovery  +  TCP command  (PythonScriptPlugin Remote Execution)
+      ▼
+UE Editor — PythonScriptPlugin interpreter
+      │  unreal.RemoteExecutionBridgeLibrary.*  (and user-added UFUNCTIONs)
+      ▼
+Plugins/RemoteExecutionBridge/   ── C++ UE plugin (this repo)
+      ├─ heartbeat + session metadata  →  green/red dot on the LevelEditor toolbar
+      └─ editor-internal APIs exposed to Python  (Kismet, MaterialEditor, … — extensible)
+```
+
+The toolbar dot is the visible proof the two halves are talking: when the MCP server's heartbeat UFUNCTION call reaches the C++ plugin, the dot turns green.
+
+### Naming map
+
+The project uses three related names. All refer to parts of the same system.
+
+| Name | Kind | Where |
+|---|---|---|
+| `ue-remote-execution-bridge` | Repo / MCP server id (`.mcp.json`) | This repo, `mcp/ue_remote_execution_bridge/server.py` |
+| `RemoteExecutionBridge`, `RemoteExecutionBridgeEditor` | C++ UE modules | `Plugins/RemoteExecutionBridge/Source/` |
+| `unreal.RemoteExecutionBridgeLibrary` (and sibling `…EditorUtilityLibrary` classes) | Python bindings generated from the C++ UFUNCTIONs | Called from `run_python` payloads |
 
 ## Requirements
 
@@ -79,14 +113,22 @@ pip install -r requirements.txt
 1. Right-click `<YourProject>.uproject` → **Generate Visual Studio project files**.
 2. Build `<YourProject>Editor Win64 Development`.
 3. Launch the editor.
-4. The status dot widget appears at the right end of the LevelEditor toolbar (red initially).
+4. The status dot widget appears at the right end of the LevelEditor toolbar (red initially — no MCP server has checked in yet).
 5. Open Claude Code in your project root. Run `/mcp` and confirm `ue_remote_execution_bridge` is connected.
 6. Within ~2 seconds, the editor Output Log shows:
    ```
    LogPython: [MCP] ue_remote_execution_bridge server connected
    ```
-   The toolbar dot turns green.
+   The toolbar dot turns green. This means the Python MCP server's heartbeat reached the C++ plugin — the two halves are integrated and live.
 7. Call the `run_python` tool with `print("hello")`. Expect `success: true` and `stdout` containing the line.
+
+## Extending the Bridge (Python API Escape Hatch)
+
+UE's Python API does not cover every editor-internal C++ facility (`FBlueprintEditorUtils`, `FAssetToolsModule`, various `UEditorEngine` members, etc.). When Python hits a wall — typically `AttributeError: module 'unreal' has no attribute …` or a symbol absent from the [official Python API docs](https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/?application_version=5.7) — **add a `UFUNCTION` to the C++ plugin in this repo and call it from Python**. This is the plugin's primary job, not an afterthought.
+
+Where to go next:
+- Existing UFUNCTION catalog and the 5-step "add a UFUNCTION" recipe: [mcp/ue_remote_execution_bridge/README.md §C++ Plugin Extension](mcp/ue_remote_execution_bridge/README.md#c-plugin-extension-python-api-escape-hatch).
+- Source to edit: `Plugins/RemoteExecutionBridge/Source/RemoteExecutionBridge/` (runtime APIs) and `Plugins/RemoteExecutionBridge/Source/RemoteExecutionBridgeEditor/` (editor-only APIs).
 
 ## Optional: C++ Plugin as a Git Submodule
 

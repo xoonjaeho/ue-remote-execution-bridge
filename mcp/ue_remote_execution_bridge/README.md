@@ -1,6 +1,6 @@
 # UE Remote Execution Bridge — MCP Server
 
-Exposes Unreal Editor 5.7's Python interpreter as MCP tools, enabling Claude to execute arbitrary Python inside the editor, control PIE, and stream the Output Log.
+Exposes Unreal Editor 5.7's Python interpreter as MCP tools, enabling Claude to execute arbitrary Python inside the editor, control PIE, and stream the Output Log. When the stock `unreal.*` Python API is missing a symbol, extend it by adding a `UFUNCTION` to the companion C++ plugin shipped in this repo — see [§C++ Plugin Extension](#c-plugin-extension-python-api-escape-hatch) below. This escape hatch is a core part of the design, not a workaround.
 
 Architecture and design decisions: [docs/DESIGN.md](./docs/DESIGN.md)
 
@@ -69,6 +69,44 @@ The MCP server starts regardless of whether the editor is running — if the edi
 | `stop_pie` | — | `LevelEditorSubsystem.editor_request_end_play()` |
 | `tail_output_log` | `since_offset: int\|None = None`, `filter_regex: str\|None = None`, `max_lines: int = 500` | Paginate `Saved/Logs/<Project>.log` using a byte-offset cursor (max 256 KB per call). Parses timestamp, category, and verbosity. |
 
+## C++ Plugin Extension (Python API Escape Hatch)
+
+The four tools above cover interpreter access, PIE control, and log tailing — they don't add new editor-internal capabilities to Python. When the stock `unreal.*` module is missing a symbol you need, add a `UFUNCTION` to the companion C++ plugin (`Plugins/RemoteExecutionBridge/` in this repo). This is the plugin's primary role and the path the bridge is designed around.
+
+### When to escalate
+
+Add a `UFUNCTION` instead of working around in Python when any of these are true:
+
+- `AttributeError: module 'unreal' has no attribute …` or `'X' object has no attribute 'Y'`
+- Symbol is absent from the [official Python API docs](https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/?application_version=5.7)
+- Needed functionality requires `FBlueprintEditorUtils`, `FAssetToolsModule`, or other engine-internal `private:` members
+- Two Python workaround attempts for the same goal both failed
+
+### Existing UFUNCTION catalog
+
+> SoT — this table is referenced from `docs/DESIGN.md §4.7`. Edit here when UFUNCTIONs are added or changed.
+
+Check here before adding a new UFUNCTION.
+
+| Module | Class | Python call | Purpose |
+|---|---|---|---|
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeLibrary` | `unreal.RemoteExecutionBridgeLibrary.heartbeat()` | MCP session alive signal |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeLibrary` | `unreal.RemoteExecutionBridgeLibrary.set_connected_{node_id,pid,ppid,cwd,start_time}(…)`, `set_active_sessions(n)` | MCP session metadata (used by the toolbar badge) |
+| `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.get_blueprint_graphs(bp) -> [UEdGraph]` | Return all graphs (EventGraph, function, macro, etc.) in a Blueprint |
+| `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.get_graph_nodes(graph) -> [UEdGraphNode]` | Return all nodes in a graph |
+| `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.find_nodes_by_function_name(bp, function_name) -> [UEdGraphNode]` | Return all `K2Node_CallFunction` nodes across all Blueprint graphs matching `function_name` |
+| `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.delete_blueprint_node(bp, node)` | Unlink all pins and remove the node from the graph |
+| `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.mark_blueprint_modified(bp)` | Set Blueprint dirty flag (marks it as needing recompile) |
+| `RemoteExecutionBridgeEditor` | `UMaterialEditorUtilityLibrary` | `unreal.MaterialEditorUtilityLibrary.get_material_expressions(material) -> [UMaterialExpression]` | Return all expression nodes in a Material |
+
+### Adding a new UFUNCTION — 5 steps
+
+1. **Choose module**: runtime UE APIs → `RemoteExecutionBridge`; editor-only engine APIs (`FBlueprintEditorUtils`, `FAssetToolsModule`, `UEditorEngine`, etc.) → `RemoteExecutionBridgeEditor`
+2. **Edit header and source**: add `UFUNCTION(BlueprintCallable, Category="RemoteExecutionBridge")` to `Source/<Module>/Public/*.h` and `Private/*.cpp`. Follow Epic's [UE C++ Coding Standard](https://dev.epicgames.com/documentation/en-us/unreal-engine/epic-cplusplus-coding-standard-for-unreal-engine).
+3. **Add Build.cs dependencies**: for editor-module APIs — `FBlueprintEditorUtils` → `Kismet`; `UEditorEngine`/`GEditor` → `UnrealEd`; `FAssetToolsModule` → `AssetTools`; `FNotificationInfo` → `Slate` + `SlateCore`
+4. **Build**: Live Coding (`Ctrl+Alt+F11`) for body-only edits, or rebuild `<YourProject>.sln` and relaunch the editor for new `UCLASS`/`UFUNCTION` declarations. Note: Live Coding only supports modifying existing function bodies reliably — new declarations require a full rebuild.
+5. **Verify and document**: confirm `unreal.ClassName.method_name(...)` works, then ① add a row to the catalog table above, ② add a usage snippet to `docs/CHEATSHEET.md`
+
 ## Connection Lifecycle
 
 - **Eager connect**: 2-second discovery on server startup. Connects immediately if the editor is running; skips silently otherwise.
@@ -101,39 +139,3 @@ Security note: the raw code is stored in plaintext until aggregated. Do not pass
 ## Security
 
 Remote Execution has **no authentication**. Keep `MulticastTtl=0` so packets never leave the local machine. Do not use on shared machines or LAN environments. See `docs/DESIGN.md §5` for details.
-
-## C++ Plugin Extension (Python API Escape Hatch)
-
-### When to escalate
-
-Add a `UFUNCTION` to `Plugins/RemoteExecutionBridge/` (companion C++ plugin in this repo) instead of working around in Python when any of these are true:
-
-- `AttributeError: module 'unreal' has no attribute …` or `'X' object has no attribute 'Y'`
-- Symbol is absent from the [official Python API docs](https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/?application_version=5.7)
-- Needed functionality requires `FBlueprintEditorUtils`, `FAssetToolsModule`, or other engine-internal `private:` members
-- Two Python workaround attempts for the same goal both failed
-
-### Existing UFUNCTION catalog
-
-> SoT — this table is referenced from `docs/DESIGN.md §4.7`. Edit here when UFUNCTIONs are added or changed.
-
-Check here before adding a new UFUNCTION.
-
-| Module | Class | Python call | Purpose |
-|---|---|---|---|
-| `RemoteExecutionBridge` | `URemoteExecutionBridgeLibrary` | `unreal.RemoteExecutionBridgeLibrary.heartbeat()` | MCP session alive signal |
-| `RemoteExecutionBridge` | `URemoteExecutionBridgeLibrary` | `unreal.RemoteExecutionBridgeLibrary.set_connected_{node_id,pid,ppid,cwd,start_time}(…)`, `set_active_sessions(n)` | MCP session metadata (used by the toolbar badge) |
-| `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.get_blueprint_graphs(bp) -> [UEdGraph]` | Return all graphs (EventGraph, function, macro, etc.) in a Blueprint |
-| `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.get_graph_nodes(graph) -> [UEdGraphNode]` | Return all nodes in a graph |
-| `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.find_nodes_by_function_name(bp, function_name) -> [UEdGraphNode]` | Return all `K2Node_CallFunction` nodes across all Blueprint graphs matching `function_name` |
-| `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.delete_blueprint_node(bp, node)` | Unlink all pins and remove the node from the graph |
-| `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.mark_blueprint_modified(bp)` | Set Blueprint dirty flag (marks it as needing recompile) |
-| `RemoteExecutionBridgeEditor` | `UMaterialEditorUtilityLibrary` | `unreal.MaterialEditorUtilityLibrary.get_material_expressions(material) -> [UMaterialExpression]` | Return all expression nodes in a Material |
-
-### Adding a new UFUNCTION — 5 steps
-
-1. **Choose module**: runtime UE APIs → `RemoteExecutionBridge`; editor-only engine APIs (`FBlueprintEditorUtils`, `FAssetToolsModule`, `UEditorEngine`, etc.) → `RemoteExecutionBridgeEditor`
-2. **Edit header and source**: add `UFUNCTION(BlueprintCallable, Category="RemoteExecutionBridge")` to `Source/<Module>/Public/*.h` and `Private/*.cpp`. Follow Epic's [UE C++ Coding Standard](https://dev.epicgames.com/documentation/en-us/unreal-engine/epic-cplusplus-coding-standard-for-unreal-engine).
-3. **Add Build.cs dependencies**: for editor-module APIs — `FBlueprintEditorUtils` → `Kismet`; `UEditorEngine`/`GEditor` → `UnrealEd`; `FAssetToolsModule` → `AssetTools`; `FNotificationInfo` → `Slate` + `SlateCore`
-4. **Build**: Live Coding (`Ctrl+Alt+F11`) for body-only edits, or rebuild `<YourProject>.sln` and relaunch the editor for new `UCLASS`/`UFUNCTION` declarations. Note: Live Coding only supports modifying existing function bodies reliably — new declarations require a full rebuild.
-5. **Verify and document**: confirm `unreal.ClassName.method_name(...)` works, then ① add a row to the catalog table above, ② add a usage snippet to `docs/CHEATSHEET.md`
