@@ -2,6 +2,8 @@
 
 Frequently-called `unreal.*` APIs used via the `run_python` MCP tool, with signatures, examples, and usage counts.
 
+> **Heads up — Python API escape hatch.** When a needed symbol is missing from `unreal.*` (typical sign: `AttributeError: module 'unreal' has no attribute …`), do not chase a Python workaround past two attempts. Add a `UFUNCTION` to the companion C++ plugin (`Plugins/RemoteExecutionBridge/` in this repo) and call it from Python. Recipe and UFUNCTION catalog: [mcp README §C++ Plugin Extension](../README.md#c-plugin-extension-python-api-escape-hatch). System overview and naming map: [repo root README §How it works](../../../README.md#how-it-works).
+
 ## How this file is maintained
 
 Incremental aggregation. The Frequency table rows are the persistent state; `usage.log` is an ephemeral delta.
