@@ -27,6 +27,8 @@ public:
 	static void SetConnectedCwd(const FString& Cwd);
 	UFUNCTION(BlueprintCallable, Category = "RemoteExecution")
 	static void SetConnectedStartTime(const FString& StartTime);
+	UFUNCTION(BlueprintCallable, Category = "RemoteExecution")
+	static void SetConnectedParentName(const FString& ParentName);
 
 	// Called by server.py heartbeat with the live session count. Thread-safe.
 	UFUNCTION(BlueprintCallable, Category = "RemoteExecution")
@@ -38,5 +40,6 @@ public:
 	static int32   GetConnectedPpid();
 	static FString GetConnectedCwd();
 	static FString GetConnectedStartTime();
+	static FString GetConnectedParentName();
 	static int32   GetActiveSessions();
 };

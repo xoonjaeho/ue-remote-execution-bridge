@@ -12,6 +12,8 @@ static FCriticalSection GCwdLock;
 static FString GCwd;
 static FCriticalSection GConnectedStartTimeLock;
 static FString GConnectedStartTime;
+static FCriticalSection GConnectedParentNameLock;
+static FString GConnectedParentName;
 
 void URemoteExecutionBridgeLibrary::Heartbeat()
 {
@@ -67,6 +69,12 @@ void URemoteExecutionBridgeLibrary::SetConnectedStartTime(const FString& StartTi
 	GConnectedStartTime = StartTime;
 }
 
+void URemoteExecutionBridgeLibrary::SetConnectedParentName(const FString& ParentName)
+{
+	FScopeLock Lock(&GConnectedParentNameLock);
+	GConnectedParentName = ParentName;
+}
+
 int32 URemoteExecutionBridgeLibrary::GetConnectedPid()
 {
 	return GPid.load(std::memory_order_relaxed);
@@ -87,4 +95,10 @@ FString URemoteExecutionBridgeLibrary::GetConnectedStartTime()
 {
 	FScopeLock Lock(&GConnectedStartTimeLock);
 	return GConnectedStartTime;
+}
+
+FString URemoteExecutionBridgeLibrary::GetConnectedParentName()
+{
+	FScopeLock Lock(&GConnectedParentNameLock);
+	return GConnectedParentName;
 }

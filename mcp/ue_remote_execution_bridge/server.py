@@ -68,19 +68,7 @@ DISCOVERY_TIMEOUT = 5.0
 EAGER_DISCOVERY_TIMEOUT = 2.0
 MAX_TAIL_BYTES = 256 * 1024
 
-_INSTRUCTIONS = """\
-Runs Python inside a live Unreal Editor 5.7 via PythonScriptPlugin Remote Execution.
-
-- The editor must be running. On `No Unreal Editor discovered within 5s`, stop and ask the user to launch it — do not retry in a loop.
-- `run_python` code is appended to `usage.log` in plaintext. Never pass credentials through `code`.
-- After any asset mutation, call `tail_output_log` with the previous `next_offset` to confirm side-effects. Silent success is not success.
-
-When `unreal.*` lacks a symbol (typical sign: `AttributeError: module 'unreal' has no attribute …`), the companion C++ plugin `Plugins/RemoteExecutionBridge/` shipped with this MCP is the intended extension path — add a `UFUNCTION`, rebuild, call as `unreal.<Class>.<method>(...)`. Don't spend more than two pure-Python workarounds on the same goal. Catalog + recipe: `mcp/ue_remote_execution_bridge/README.md §C++ Plugin Extension`.
-
-Deeper reference: `mcp/ue_remote_execution_bridge/README.md`, `docs/DESIGN.md`, `docs/CHEATSHEET.md`.
-"""
-
-mcp = FastMCP("ue_remote_execution_bridge", instructions=_INSTRUCTIONS)
+mcp = FastMCP("ue_remote_execution_bridge")
 
 _PID = os.getpid()
 _PPID = os.getppid()
@@ -109,6 +97,10 @@ _kernel32.OpenProcess.restype = ctypes.c_void_p
 _kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_uint32]
 _kernel32.CloseHandle.restype = ctypes.c_bool
 _kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+_kernel32.QueryFullProcessImageNameW.restype = ctypes.c_bool
+_kernel32.QueryFullProcessImageNameW.argtypes = [
+    ctypes.c_void_p, ctypes.c_uint32, ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_uint32)
+]
 
 _WAIT_OBJECT_0 = 0x00000000
 _WAIT_ABANDONED = 0x00000080
@@ -118,6 +110,25 @@ _UE_MUTEX_NAME = "Local\\UE_RemoteExecution_Bridge"
 _ue_mutex = _kernel32.CreateMutexW(None, False, _UE_MUTEX_NAME)
 if not _ue_mutex:
     raise OSError(f"CreateMutexW failed: {ctypes.get_last_error()}")
+
+
+def _query_process_name(pid: int) -> str:
+    # PROCESS_QUERY_LIMITED_INFORMATION works for most processes without elevation.
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    h = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = ctypes.c_uint32(len(buf))
+        if _kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return Path(buf.value).name
+        return ""
+    finally:
+        _kernel32.CloseHandle(h)
+
+
+_PARENT_NAME = _query_process_name(_PPID)
 
 
 def _acquire_ue_mutex(timeout_ms: int = _INFINITE) -> bool:
@@ -229,6 +240,7 @@ def _try_heartbeat() -> None:
                 f"    unreal.RemoteExecutionBridgeLibrary.set_connected_ppid({_PPID})\n"
                 f"    unreal.RemoteExecutionBridgeLibrary.set_connected_cwd({json.dumps(_CWD)})\n"
                 f'    unreal.RemoteExecutionBridgeLibrary.set_connected_start_time("{_START_TIME}")\n'
+                f"    unreal.RemoteExecutionBridgeLibrary.set_connected_parent_name({json.dumps(_PARENT_NAME)})\n"
             ) if active == 1 else ""
             announce_line = (
                 'print("[MCP] ue_remote_execution_bridge server connected")\n'
@@ -301,6 +313,7 @@ def _ue_connection() -> Generator[RemoteExecution, None, None]:
                 f"    unreal.RemoteExecutionBridgeLibrary.set_connected_ppid({_PPID})\n"
                 f"    unreal.RemoteExecutionBridgeLibrary.set_connected_cwd({json.dumps(_CWD)})\n"
                 f'    unreal.RemoteExecutionBridgeLibrary.set_connected_start_time("{_START_TIME}")\n'
+                f"    unreal.RemoteExecutionBridgeLibrary.set_connected_parent_name({json.dumps(_PARENT_NAME)})\n"
                 "except AttributeError:\n"
                 "    pass\n",
                 unattended=True,
