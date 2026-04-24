@@ -91,7 +91,7 @@ Check here before adding a new UFUNCTION.
 | Module | Class | Python call | Purpose |
 |---|---|---|---|
 | `RemoteExecutionBridge` | `URemoteExecutionBridgeLibrary` | `unreal.RemoteExecutionBridgeLibrary.heartbeat()` | MCP session alive signal |
-| `RemoteExecutionBridge` | `URemoteExecutionBridgeLibrary` | `unreal.RemoteExecutionBridgeLibrary.set_connected_{node_id,pid,ppid,cwd,start_time}(…)`, `set_active_sessions(n)` | MCP session metadata (used by the toolbar badge) |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeLibrary` | `unreal.RemoteExecutionBridgeLibrary.set_connected_{node_id,pid,ppid,parent_name,cwd,start_time}(…)`, `set_active_sessions(n)` | MCP session metadata (used by the toolbar badge) |
 | `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.get_blueprint_graphs(bp) -> [UEdGraph]` | Return all graphs (EventGraph, function, macro, etc.) in a Blueprint |
 | `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.get_graph_nodes(graph) -> [UEdGraphNode]` | Return all nodes in a graph |
 | `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.find_nodes_by_function_name(bp, function_name) -> [UEdGraphNode]` | Return all `K2Node_CallFunction` nodes across all Blueprint graphs matching `function_name` |
