@@ -68,7 +68,19 @@ DISCOVERY_TIMEOUT = 5.0
 EAGER_DISCOVERY_TIMEOUT = 2.0
 MAX_TAIL_BYTES = 256 * 1024
 
-mcp = FastMCP("ue_remote_execution_bridge")
+_INSTRUCTIONS = """\
+Runs Python inside a live Unreal Editor 5.7 via PythonScriptPlugin Remote Execution.
+
+- The editor must be running. On `No Unreal Editor discovered within 5s`, stop and ask the user to launch it — do not retry in a loop.
+- `run_python` code is appended to `usage.log` in plaintext. Never pass credentials through `code`.
+- After any asset mutation, call `tail_output_log` with the previous `next_offset` to confirm side-effects. Silent success is not success.
+
+When `unreal.*` lacks a symbol (typical sign: `AttributeError: module 'unreal' has no attribute …`), the companion C++ plugin `Plugins/RemoteExecutionBridge/` shipped with this MCP is the intended extension path — add a `UFUNCTION`, rebuild, call as `unreal.<Class>.<method>(...)`. Don't spend more than two pure-Python workarounds on the same goal. Catalog + recipe: `mcp/ue_remote_execution_bridge/README.md §C++ Plugin Extension`.
+
+Deeper reference: `mcp/ue_remote_execution_bridge/README.md`, `docs/DESIGN.md`, `docs/CHEATSHEET.md`.
+"""
+
+mcp = FastMCP("ue_remote_execution_bridge", instructions=_INSTRUCTIONS)
 
 _PID = os.getpid()
 _PPID = os.getppid()
@@ -114,12 +126,15 @@ if not _ue_mutex:
 
 def _query_process_name(pid: int) -> str:
     # PROCESS_QUERY_LIMITED_INFORMATION works for most processes without elevation.
+    # Buffer sized for Windows long paths (up to 32767 WCHARs). CPython's
+    # create_unicode_buffer(n) allocates n+1 wide chars internally (extra slot for
+    # the null terminator), so passing len(buf) as the API's size parameter is safe.
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     h = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not h:
         return ""
     try:
-        buf = ctypes.create_unicode_buffer(1024)
+        buf = ctypes.create_unicode_buffer(32768)
         size = ctypes.c_uint32(len(buf))
         if _kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
             return Path(buf.value).name
@@ -225,10 +240,14 @@ def _open_remote(timeout: float) -> tuple[RemoteExecution, str] | None:
 
 def _try_heartbeat() -> None:
     """Update UE-side heartbeat/node-ID state. Skips silently if mutex unavailable."""
-    global _session_announced
+    global _session_announced, _PARENT_NAME
     if not _acquire_ue_mutex(timeout_ms=100):
         return
     try:
+        # Lazy retry: the parent process may have been unreachable at module-load
+        # (rare race window). Re-query here so the tooltip eventually shows a name.
+        if not _PARENT_NAME:
+            _PARENT_NAME = _query_process_name(_PPID)
         result = _open_remote(EAGER_DISCOVERY_TIMEOUT)
         if result is None:
             return
