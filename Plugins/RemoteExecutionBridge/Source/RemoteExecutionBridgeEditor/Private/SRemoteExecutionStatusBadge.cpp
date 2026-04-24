@@ -1,6 +1,7 @@
 #include "SRemoteExecutionStatusBadge.h"
 #include "RemoteExecutionBridgeLibrary.h"
 #include "Widgets/Text/STextBlock.h"
+#include "HAL/PlatformProcess.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/Paths.h"
 
@@ -57,55 +58,85 @@ FText SRemoteExecutionStatusBadge::GetTooltipText() const
 		: TEXT("Disconnected");
 
 	const double LastTime = URemoteExecutionBridgeLibrary::GetLastHeartbeatTime();
-	FString TimeStr;
+	FString HeartbeatStr;
 	if (LastTime <= 0.0)
 	{
-		TimeStr = TEXT("never");
+		HeartbeatStr = TEXT("never");
 	}
 	else
 	{
 		const double Elapsed = FPlatformTime::Seconds() - LastTime;
-		TimeStr = FString::Printf(TEXT("%.1fs ago"), Elapsed);
+		HeartbeatStr = FString::Printf(TEXT("%.1fs ago"), Elapsed);
 	}
 
-	const FString NodeId = URemoteExecutionBridgeLibrary::GetConnectedNodeId();
-	const int32 Pid = URemoteExecutionBridgeLibrary::GetConnectedPid();
-	const int32 Ppid = URemoteExecutionBridgeLibrary::GetConnectedPpid();
-	const FString Cwd = URemoteExecutionBridgeLibrary::GetConnectedCwd();
-	const FString StartTime = URemoteExecutionBridgeLibrary::GetConnectedStartTime();
 	static const FString ConfigSection = TEXT("/Script/PythonScriptPlugin.PythonScriptPluginSettings");
 	FString Endpoint;
 	int32 Ttl = -1;
 	GConfig->GetString(*ConfigSection, TEXT("RemoteExecutionMulticastGroupEndpoint"), Endpoint, GEngineIni);
 	GConfig->GetInt(*ConfigSection, TEXT("RemoteExecutionMulticastTtl"), Ttl, GEngineIni);
 
+	const FString EndpointStr = Endpoint.IsEmpty() ? FString(TEXT("—")) : Endpoint;
 	const FString TtlStr = (Ttl == 0)
-		? TEXT("0 (local only)")
+		? FString(TEXT("0 (local only)"))
 		: FString::Printf(TEXT("%d"), Ttl);
-
-	const FString PidStr = (Pid == 0)
-		? FString(TEXT("—"))
-		: FString::Printf(TEXT("%d (parent %d)"), Pid, Ppid);
-
-	const FString ProjectStr = Cwd.IsEmpty()
-		? FString(TEXT("—"))
-		: FPaths::GetPathLeaf(Cwd);
-
-	const FString StartedStr = StartTime.IsEmpty() ? FString(TEXT("—")) : StartTime;
 
 	const int32 ActiveSessions = URemoteExecutionBridgeLibrary::GetActiveSessions();
 	const FString SessionsStr = FString::Printf(TEXT("%d"), FMath::Max(1, ActiveSessions));
 
+	const uint32 EditorPid = FPlatformProcess::GetCurrentProcessId();
+	const FString EditorPidStr = FString::Printf(TEXT("%u"), EditorPid);
+	const FString EditorPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+
+	const FString NodeId = URemoteExecutionBridgeLibrary::GetConnectedNodeId();
+	const FString NodeStr = NodeId.IsEmpty() ? FString(TEXT("—")) : NodeId;
+
+	const int32 McpPid = URemoteExecutionBridgeLibrary::GetConnectedPid();
+	const int32 McpPpid = URemoteExecutionBridgeLibrary::GetConnectedPpid();
+	const FString McpParentName = URemoteExecutionBridgeLibrary::GetConnectedParentName();
+	FString McpPidStr;
+	if (McpPid == 0)
+	{
+		McpPidStr = TEXT("—");
+	}
+	else
+	{
+		const FString ParentNameStr = McpParentName.IsEmpty() ? FString(TEXT("?")) : McpParentName;
+		McpPidStr = FString::Printf(TEXT("%d (parent : %d, %s)"), McpPid, McpPpid, *ParentNameStr);
+	}
+
+	const FString StartTime = URemoteExecutionBridgeLibrary::GetConnectedStartTime();
+	const FString StartedStr = StartTime.IsEmpty() ? FString(TEXT("—")) : StartTime;
+
+	const FString Cwd = URemoteExecutionBridgeLibrary::GetConnectedCwd();
+	const FString ProjectStr = Cwd.IsEmpty() ? FString(TEXT("—")) : FPaths::GetPathLeaf(Cwd);
+
 	return FText::FromString(FString::Printf(
-		TEXT("Remote Execution Bridge\nStatus: %s\nSessions: %s\nHeartbeat: %s\nNode: %s\nPID: %s\nStarted: %s\nProject: %s\nEndpoint: %s\nTTL: %s"),
+		TEXT("Remote Execution Bridge\n")
+		TEXT("Status: %s\n")
+		TEXT("Sessions: %s\n")
+		TEXT("Heartbeat: %s\n")
+		TEXT("Endpoint: %s\n")
+		TEXT("TTL: %s\n")
+		TEXT("\n")
+		TEXT("UE\n")
+		TEXT("PID: %s\n")
+		TEXT("Node: %s\n")
+		TEXT("Path : %s\n")
+		TEXT("\n")
+		TEXT("MCP\n")
+		TEXT("PID: %s\n")
+		TEXT("Started: %s\n")
+		TEXT("Project: %s"),
 		*StatusStr,
 		*SessionsStr,
-		*TimeStr,
-		*(NodeId.IsEmpty() ? FString(TEXT("—")) : NodeId),
-		*PidStr,
+		*HeartbeatStr,
+		*EndpointStr,
+		*TtlStr,
+		*EditorPidStr,
+		*NodeStr,
+		*EditorPath,
+		*McpPidStr,
 		*StartedStr,
-		*ProjectStr,
-		*(Endpoint.IsEmpty() ? FString(TEXT("—")) : Endpoint),
-		*TtlStr
+		*ProjectStr
 	));
 }
