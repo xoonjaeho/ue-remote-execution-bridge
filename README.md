@@ -55,6 +55,10 @@ The project uses three related names. All refer to parts of the same system.
 
 > The Python server uses a Win32 cross-process mutex (`CreateMutexW`) and is Windows-only. The C++ plugin is also declared `SupportedTargetPlatforms: ["Win64"]`.
 
+## Security
+
+Remote Execution has **no authentication**. Keep `RemoteExecutionMulticastTtl=0` so packets never leave the local machine. Do not use on shared machines or on a LAN. See `mcp/ue_remote_execution_bridge/docs/DESIGN.md §5` for threat model details.
+
 ## Install
 
 Five manual steps. Complete them in order.
@@ -122,6 +126,28 @@ pip install -r requirements.txt
    The toolbar dot turns green. This means the Python MCP server's heartbeat reached the C++ plugin — the two halves are integrated and live.
 7. Call the `run_python` tool with `print("hello")`. Expect `success: true` and `stdout` containing the line.
 
+If any step above fails, see [MCP server README §Troubleshooting](mcp/ue_remote_execution_bridge/README.md#troubleshooting) for common errors.
+
+## MCP Tools
+
+> SoT — this table is referenced from `mcp/ue_remote_execution_bridge/docs/DESIGN.md §4.3`. Edit here when signatures change.
+
+| Tool | Parameters (defaults) | Behavior |
+|---|---|---|
+| `run_python` | `code: str`, `mode: "exec_file"\|"exec_statement"\|"eval_statement" = "exec_file"`, `unattended: bool = True` | Execute Python inside the editor. Only `eval_statement` returns a value. |
+| `start_pie` | — | `LevelEditorSubsystem.editor_request_begin_play()` |
+| `stop_pie` | — | `LevelEditorSubsystem.editor_request_end_play()` |
+| `tail_output_log` | `since_offset: int\|None = None`, `filter_regex: str\|None = None`, `max_lines: int = 500` | Paginate `Saved/Logs/<Project>.log` using a byte-offset cursor (max 256 KB per call). Parses timestamp, category, and verbosity. |
+
+## Runtime artifacts
+
+Two artifacts accumulate alongside the server once the bridge is in use:
+
+- `mcp/ue_remote_execution_bridge/usage.log` — raw `run_python` code appended on every call (plaintext; never pass credentials through `code`).
+- `mcp/ue_remote_execution_bridge/docs/CHEATSHEET.md` — curated `unreal.*` snippet index, incrementally folded from `usage.log`.
+
+Workflow: ask Claude to "scan usage.log and update CHEATSHEET", then truncate the log. Full rules: [MCP server README §Usage Logging](mcp/ue_remote_execution_bridge/README.md#usage-logging).
+
 ## Extending the Bridge (Python API Escape Hatch)
 
 UE's Python API does not cover every editor-internal C++ facility (`FBlueprintEditorUtils`, `FAssetToolsModule`, various `UEditorEngine` members, etc.). When Python hits a wall — typically `AttributeError: module 'unreal' has no attribute …` or a symbol absent from the [official Python API docs](https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/?application_version=5.7) — **add a `UFUNCTION` to the C++ plugin in this repo and call it from Python**. This is the plugin's primary job, not an afterthought.
@@ -148,7 +174,8 @@ Original code (`server.py`, all C++ source, all documentation) is released under
 
 ## Links
 
-- [MCP server README](mcp/ue_remote_execution_bridge/README.md) — tool reference, troubleshooting, usage logging
+- [MCP server README](mcp/ue_remote_execution_bridge/README.md) — operations, troubleshooting, UFUNCTION extension
 - [Design document](mcp/ue_remote_execution_bridge/docs/DESIGN.md) — protocol details, architecture decision record
+- [UE Python API cheatsheet](mcp/ue_remote_execution_bridge/docs/CHEATSHEET.md) — frequently-used `unreal.*` snippets, aggregated from `usage.log`
 - [UE Python API (5.7)](https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/?application_version=5.7)
 - [Issues](https://github.com/xoonjaeho/ue-remote-execution-bridge/issues)
