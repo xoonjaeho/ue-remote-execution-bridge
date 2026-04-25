@@ -227,7 +227,7 @@ The primary use case is Claude **iteratively** controlling UE. The benefits of c
 
 ### 4.3 Currently Implemented Tools
 
-For the exposed tool list and signatures, see the table in `../README.md §Exposed Tools` (SoT).
+For the exposed tool list and signatures, see the table in `../../../README.md §MCP Tools` (SoT).
 
 A `global_scope` parameter was planned early in the design but is unexposed due to the protocol constraint described in §2.4.
 

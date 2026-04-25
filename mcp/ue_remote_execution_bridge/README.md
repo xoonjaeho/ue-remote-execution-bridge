@@ -4,6 +4,8 @@ Exposes Unreal Editor 5.7's Python interpreter as MCP tools, enabling Claude to 
 
 Architecture and design decisions: [docs/DESIGN.md](./docs/DESIGN.md)
 
+> This document is the MCP server subproject's **operations & extension manual**. For a public overview, install steps, the tool list, and security warnings, see the [root README](../../README.md).
+
 ## Files
 
 | File | Role |
@@ -58,20 +60,9 @@ After adding or editing `.mcp.json`, restart Claude Code or run `/mcp` to reload
 
 The MCP server starts regardless of whether the editor is running — if the editor is off, it waits silently and retries discovery on the first tool call. Confirm the connection: after the first tool call, look for `[MCP] ue_remote_execution_bridge server connected` in the UE Output Log.
 
-## Exposed Tools
-
-> SoT — this table is referenced from `docs/DESIGN.md §4.3`. Edit here when signatures change.
-
-| Tool | Parameters (defaults) | Behavior |
-|---|---|---|
-| `run_python` | `code: str`, `mode: "exec_file"\|"exec_statement"\|"eval_statement" = "exec_file"`, `unattended: bool = True` | Execute Python inside the editor. Only `eval_statement` returns a value. |
-| `start_pie` | — | `LevelEditorSubsystem.editor_request_begin_play()` |
-| `stop_pie` | — | `LevelEditorSubsystem.editor_request_end_play()` |
-| `tail_output_log` | `since_offset: int\|None = None`, `filter_regex: str\|None = None`, `max_lines: int = 500` | Paginate `Saved/Logs/<Project>.log` using a byte-offset cursor (max 256 KB per call). Parses timestamp, category, and verbosity. |
-
 ## C++ Plugin Extension (Python API Escape Hatch)
 
-The four tools above cover interpreter access, PIE control, and log tailing — they don't add new editor-internal capabilities to Python. When the stock `unreal.*` module is missing a symbol you need, add a `UFUNCTION` to the companion C++ plugin (`Plugins/RemoteExecutionBridge/` in this repo). This is the plugin's primary role and the path the bridge is designed around.
+The four MCP tools (see [root README §MCP Tools](../../README.md#mcp-tools)) cover interpreter access, PIE control, and log tailing — they don't add new editor-internal capabilities to Python. When the stock `unreal.*` module is missing a symbol you need, add a `UFUNCTION` to the companion C++ plugin (`Plugins/RemoteExecutionBridge/` in this repo). This is the plugin's primary role and the path the bridge is designed around.
 
 ### When to escalate
 
@@ -135,7 +126,3 @@ Every `run_python` invocation appends the raw code to `usage.log` in the format 
 `usage.log` is an **ephemeral delta between aggregations** — ask Claude to "scan usage.log and update CHEATSHEET" to incrementally merge counts into `docs/CHEATSHEET.md` (cumulative count, updated last-seen), then truncate the log. Full procedure: `docs/CHEATSHEET.md §How this file is maintained`.
 
 Security note: the raw code is stored in plaintext until aggregated. Do not pass credentials or secrets through `run_python`.
-
-## Security
-
-Remote Execution has **no authentication**. Keep `MulticastTtl=0` so packets never leave the local machine. Do not use on shared machines or LAN environments. See `docs/DESIGN.md §5` for details.
