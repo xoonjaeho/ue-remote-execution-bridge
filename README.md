@@ -16,8 +16,6 @@ Both halves ship together and are designed to be used together.
 | `Config/DefaultEngine.ini.snippet` | Engine settings block to append to your project's `DefaultEngine.ini`. |
 | `.mcp.json.example` | MCP registration template to copy to your project root as `.mcp.json`. |
 
-Each half is installable alone (Python server only → four MCP tools, no badge; C++ plugin only → badge + UFUNCTIONs, no MCP), but installing both is the default and intended setup.
-
 ## How it works
 
 ```
@@ -25,7 +23,8 @@ Claude Code (MCP client)
       │  stdio
       ▼
 mcp/ue_remote_execution_bridge/server.py   ── Python MCP server (this repo)
-      │  UDP 6766 discovery  +  TCP command  (PythonScriptPlugin Remote Execution)
+      │  UDP multicast 239.0.0.1:6766 (discovery) + TCP (command, dynamic port)
+      │  — PythonScriptPlugin Remote Execution
       ▼
 UE Editor — PythonScriptPlugin interpreter
       │  unreal.RemoteExecutionBridgeLibrary.*  (and user-added UFUNCTIONs)
@@ -35,17 +34,15 @@ Plugins/RemoteExecutionBridge/   ── C++ UE plugin (this repo)
       └─ editor-internal APIs exposed to Python  (Kismet, MaterialEditor, … — extensible)
 ```
 
-The toolbar dot is the visible proof the two halves are talking: when the MCP server's heartbeat UFUNCTION call reaches the C++ plugin, the dot turns green.
+The toolbar dot is the visible proof the two halves are talking: when the MCP server's heartbeat UFUNCTION call reaches the C++ plugin, the dot turns green. When heartbeats expire, the dot turns red and stale MCP session metadata is cleared from the tooltip.
 
 ### Naming map
 
-The project uses three related names. All refer to parts of the same system.
+Three related names refer to parts of the same system:
 
-| Name | Kind | Where |
-|---|---|---|
-| `ue-remote-execution-bridge` | Repo / MCP server id (`.mcp.json`) | This repo, `mcp/ue_remote_execution_bridge/server.py` |
-| `RemoteExecutionBridge`, `RemoteExecutionBridgeEditor` | C++ UE modules | `Plugins/RemoteExecutionBridge/Source/` |
-| `unreal.RemoteExecutionBridgeLibrary` (and sibling `…EditorUtilityLibrary` classes) | Python bindings generated from the C++ UFUNCTIONs | Called from `run_python` payloads |
+- Repo / MCP id: `ue-remote-execution-bridge`
+- C++ modules (under `Plugins/RemoteExecutionBridge/Source/`): `RemoteExecutionBridge`, `RemoteExecutionBridgeEditor`
+- Python-facing classes (called from `run_python`): `unreal.RemoteExecutionBridgeLibrary`, `unreal.BlueprintEditorUtilityLibrary`, `unreal.MaterialEditorUtilityLibrary`
 
 ## Requirements
 
@@ -53,11 +50,15 @@ The project uses three related names. All refer to parts of the same system.
 - Python 3.10+ on `PATH`
 - Claude Code (or any MCP-compatible client that supports stdio servers)
 
-> The Python server uses a Win32 cross-process mutex (`CreateMutexW`) and is Windows-only. The C++ plugin is also declared `SupportedTargetPlatforms: ["Win64"]`.
+> Windows only. The Python server uses `CreateMutexW` and raises `RuntimeError` on import elsewhere; the C++ plugin declares `SupportedTargetPlatforms: ["Win64"]`.
+
+> `RemoteExecutionBridge.uplugin` pins `EngineVersion: 5.7.0`. Bump on engine upgrade — UE warns on patch-level mismatch.
 
 ## Security
 
 Remote Execution has **no authentication**. Keep `RemoteExecutionMulticastTtl=0` so packets never leave the local machine. Do not use on shared machines or on a LAN. See `mcp/ue_remote_execution_bridge/docs/DESIGN.md §5` for threat model details.
+
+> `mcp/ue_remote_execution_bridge/usage.log` stores every `run_python` payload in plaintext. Windows' default NTFS DACL grants read access to `BUILTIN\Users`, so any local user on the machine can read it. Restrict the directory's permissions or do not pass secrets through `run_python`.
 
 ## Install
 
@@ -104,7 +105,7 @@ Copy `.mcp.json.example` to `<YourProject>/.mcp.json` (or merge the `mcpServers`
 }
 ```
 
-The path in `args` is relative to the directory Claude Code is launched from (your project root). If you place the `mcp/` folder elsewhere, set the `UE_PROJECT_ROOT` environment variable to your project root and adjust `args` accordingly.
+`args` is relative to the project root (where Claude Code launches). For non-mirrored layouts (`UE_PROJECT_ROOT` override) and workspace-aware editor matching, see the [MCP server README](mcp/ue_remote_execution_bridge/README.md#mcp-registration).
 
 Finally, install the Python dependency:
 
@@ -125,6 +126,8 @@ pip install -r requirements.txt
    ```
    The toolbar dot turns green. This means the Python MCP server's heartbeat reached the C++ plugin — the two halves are integrated and live.
 7. Call the `run_python` tool with `print("hello")`. Expect `success: true` and `stdout` containing the line.
+8. Cursor pagination: call `tail_output_log()`, save its `cursor`, run `run_python` with `print("pagination check")`, then call `tail_output_log(since_offset=<cursor>)`. The new line must appear and `cursor` must advance.
+9. PIE (run from a clean editor): `start_pie` returns `stdout` containing `PIE start requested`, then `stop_pie` returns `PIE end requested`. Re-running the same call without flipping state returns `PIE already running; no-op` or `PIE not running; no-op`.
 
 If any step above fails, see [MCP server README §Troubleshooting](mcp/ue_remote_execution_bridge/README.md#troubleshooting) for common errors.
 
@@ -139,14 +142,9 @@ If any step above fails, see [MCP server README §Troubleshooting](mcp/ue_remote
 | `stop_pie` | — | `LevelEditorSubsystem.editor_request_end_play()` |
 | `tail_output_log` | `since_offset: int\|None = None`, `filter_regex: str\|None = None`, `max_lines: int = 500` | Paginate `Saved/Logs/<Project>.log` using a byte-offset cursor (max 256 KB per call). Parses timestamp, category, and verbosity. |
 
-## Runtime artifacts
+## Operations Manual
 
-Two artifacts accumulate alongside the server once the bridge is in use:
-
-- `mcp/ue_remote_execution_bridge/usage.log` — raw `run_python` code appended on every call (plaintext; never pass credentials through `code`).
-- `mcp/ue_remote_execution_bridge/docs/CHEATSHEET.md` — curated `unreal.*` snippet index, incrementally folded from `usage.log`.
-
-Workflow: ask Claude to "scan usage.log and update CHEATSHEET", then truncate the log. Full rules: [MCP server README §Usage Logging](mcp/ue_remote_execution_bridge/README.md#usage-logging).
+Day-to-day operations — registration, connection lifecycle, troubleshooting, `usage.log` maintenance — live in the [MCP server README](mcp/ue_remote_execution_bridge/README.md).
 
 ## Extending the Bridge (Python API Escape Hatch)
 
@@ -156,21 +154,9 @@ Where to go next:
 - Existing UFUNCTION catalog and the 5-step "add a UFUNCTION" recipe: [mcp/ue_remote_execution_bridge/README.md §C++ Plugin Extension](mcp/ue_remote_execution_bridge/README.md#c-plugin-extension-python-api-escape-hatch).
 - Source to edit: `Plugins/RemoteExecutionBridge/Source/RemoteExecutionBridge/` (runtime APIs) and `Plugins/RemoteExecutionBridge/Source/RemoteExecutionBridgeEditor/` (editor-only APIs).
 
-## Optional: C++ Plugin as a Git Submodule
-
-If you want to track the plugin separately from the MCP server:
-
-```bash
-git submodule add https://github.com/xoonjaeho/ue-remote-execution-bridge Plugins/RemoteExecutionBridge
-```
-
-This only works for the C++ plugin half. The Python server is better managed as a plain directory copy because its `.mcp.json` registration lives at your project root (outside any submodule boundary).
-
 ## License and Attribution
 
-Original code (`server.py`, all C++ source, all documentation) is released under the **MIT License**. See `LICENSE`.
-
-`mcp/ue_remote_execution_bridge/execute.py` is a verbatim copy of Epic's `remote_execution.py` ("Copyright Epic Games, Inc. All Rights Reserved."), renamed to avoid an import-path collision. Use of this file is governed by the Unreal Engine EULA. See `NOTICE`.
+MIT (`LICENSE`). Exception: `mcp/ue_remote_execution_bridge/execute.py` is a verbatim copy of Epic's `remote_execution.py`, renamed to avoid import-path collision; governed by the Unreal Engine EULA — see `NOTICE`.
 
 ## Links
 

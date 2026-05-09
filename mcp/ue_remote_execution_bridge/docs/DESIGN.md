@@ -19,7 +19,7 @@ This project ships two cooperating halves under three related names — all poin
 |---|---|---|
 | `ue-remote-execution-bridge` | Repo / MCP server id (`.mcp.json`) | This repo, `mcp/ue_remote_execution_bridge/server.py` |
 | `RemoteExecutionBridge`, `RemoteExecutionBridgeEditor` | C++ UE modules | `Plugins/RemoteExecutionBridge/Source/` |
-| `unreal.RemoteExecutionBridgeLibrary` (and `…EditorUtilityLibrary` siblings) | Python bindings generated from the C++ UFUNCTIONs | Called from `run_python` payloads |
+| `unreal.RemoteExecutionBridgeLibrary`, `unreal.BlueprintEditorUtilityLibrary`, `unreal.MaterialEditorUtilityLibrary` | Python bindings generated from the C++ UFUNCTIONs | Called from `run_python` payloads |
 
 The C++ plugin is also the designed **Python API escape hatch** — when `unreal.*` lacks a symbol, add a UFUNCTION. See §4.7 and [mcp README §C++ Plugin Extension](../README.md#c-plugin-extension-python-api-escape-hatch).
 
@@ -99,14 +99,7 @@ Independently of `exec_mode`, the **execution context** can be selected:
 
 ### 2.6 Active Configuration Example
 
-`.uproject` (`Plugins` array):
-
-```json
-{
-  "Name": "PythonScriptPlugin",
-  "Enabled": true
-}
-```
+`.uproject` Plugins entries are listed in the [root README §Install Step 4](../../../README.md#install).
 
 `Config/DefaultEngine.ini`:
 
@@ -285,7 +278,7 @@ Initial target: 4 tools (`run_python`, `start_pie`, `stop_pie`, `tail_output_log
 - **Advantages**
   - Full ownership and understanding of the entire codebase — error format, log filtering, state cache are all customizable
   - Shallow dependency tree (MCP SDK only). UE uses only the built-in `remote_execution.py`; no additional UE plugin installation
-  - Security policy (localhost, TTL=0, whitelisted Python code patterns) can be embedded exactly as needed
+  - Security policy (localhost, TTL=0) can be embedded as needed. `run_python` is unconstrained — there is no code-pattern allowlist; trust is inherited from the MCP client.
   - Natural fit with the project's `mcp/` conventions and Python standards
 - **Disadvantages**
   - Initial implementation and testing time (half a day to a day)
@@ -317,44 +310,15 @@ Implementation scope:
 
 ### 4.5 Claude Code Registration
 
-Copy `.mcp.json.example` at the repo root to your UE project's root as `.mcp.json`:
+Registration is covered in the [root README §Install Step 5](../../../README.md#install). Operational notes (`UE_PROJECT_ROOT` override, `/mcp` reload) are in the [MCP README §MCP Registration](../README.md#mcp-registration).
 
-```json
-{
-  "mcpServers": {
-    "ue_remote_execution_bridge": {
-      "command": "python",
-      "args": ["mcp/ue_remote_execution_bridge/server.py"]
-    }
-  }
-}
-```
+### 4.6 Notification Design Rationale
 
-The path in `args` is relative to the directory Claude Code is launched from (your project root). Alternatively, set the `UE_PROJECT_ROOT` environment variable to your project root if the `mcp/` folder is at a different relative position.
-
-### 4.6 Connection Lifecycle and Notifications
-
-The server opens a TCP session with UE at two points:
-
-1. **Eager connect** — one discovery at server startup with `DISCOVERY_TIMEOUT=2s`. Connects immediately if the editor is running; skips silently otherwise.
-2. **Per-call connect** — each tool call opens a fresh UDP discovery (`timeout=5s`) + TCP handshake and closes the connection on exit (~100–200 ms overhead). Connection reuse is deferred to a later revision.
-
-The first successful heartbeat writes a single line to the editor Output Log:
-
-```
-LogPython: [MCP] ue_remote_execution_bridge server connected
-```
-
-Subsequent heartbeats and tool calls produce no Output Log notification (spam prevention).
+Operational behavior (eager/per-call connect timings, Output Log line, reconnect semantics) is documented in the [MCP README §Connection Lifecycle](../README.md#connection-lifecycle). This section records *why* the chosen channels were chosen.
 
 **Viewport on-screen toasts were not adopted.** `unreal.SystemLibrary.print_string(..., print_to_screen=True)` goes through GEngine's `AddOnScreenDebugMessage` path, which only renders during PIE/Standalone world rendering — invisible when the editor is idle. Slate-native notifications (`FNotificationInfo` bottom-right toast) are not exposed in the UE 5.7 Python API — this limitation was one of the triggers for introducing `Plugins/RemoteExecutionBridge/`.
 
-The current approach combines an editor toolbar badge (`SRemoteExecutionStatusBadge`) with the single Output Log line. If a toast becomes necessary in the future, a `FNotificationInfo` UFUNCTION can be added to the `RemoteExecutionBridgeEditor` module. Extension procedure: `../README.md §C++ Plugin Extension`.
-
-Reconnect behavior:
-
-- `_session_announced` is a module-level flag — it resets only when the MCP server process itself restarts. If the UE editor restarts while the server is running, the announcement is not repeated.
-- If the editor is unreachable, tool calls return an error immediately.
+The current approach combines an editor toolbar badge (`SRemoteExecutionStatusBadge`) with a single Output Log line on first connect (suppressed thereafter via the module-level `_session_announced` flag — resets only on MCP server restart, not on UE editor restart). If a toast becomes necessary in the future, a `FNotificationInfo` UFUNCTION can be added to the `RemoteExecutionBridgeEditor` module. Extension procedure: `../README.md §C++ Plugin Extension`.
 
 ### 4.7 C++ Plugin Surface (RemoteExecutionBridge)
 
@@ -366,6 +330,8 @@ An in-repo C++ plugin that exposes engine-internal APIs unreachable by the Pytho
 |---|---|---|---|
 | `RemoteExecutionBridge` | UncookedOnly | Default | MCP session state (heartbeat, metadata, toolbar badge data) |
 | `RemoteExecutionBridgeEditor` | Editor | PostEngineInit | Blueprint graph manipulation and other editor-only engine APIs |
+
+`UncookedOnly` keeps the module out of cooked Shipping/Test targets by UBT definition — heartbeat UFUNCTIONs and session-metadata strings cannot leak into a packaged game binary, even without per-`.uproject` platform guards.
 
 Module selection for new UFUNCTIONs: runtime UE APIs → `RemoteExecutionBridge`; editor-only APIs (`FBlueprintEditorUtils`, `GEditor`, Slate, etc.) → `RemoteExecutionBridgeEditor`.
 
@@ -380,7 +346,7 @@ See the table in `../README.md §Existing UFUNCTION catalog` (SoT). Extension pr
 - **Remote Execution has no authentication.** Any client in multicast range can connect and execute arbitrary Python. Set `RemoteExecutionMulticastTtl=0` to prevent packets from leaving the local machine.
 - **Firewall**: Windows Defender will prompt to allow UDP 6766 and the editor's TCP listen port at least once. Allow only on the Private network profile.
 - **Do not share on shared machines**: leaving this configuration on a public machine or conference room PC exposes the editor to anyone on the same LAN segment. Always keep TTL=0.
-- **Editor restart resilience**: on TCP disconnect, the next call retries once + re-discovers. See §4.6 for details.
+- **Editor restart resilience**: on TCP disconnect, the next call retries once + re-discovers. See §4.2 and the [MCP README §Connection Lifecycle](../README.md#connection-lifecycle) for details.
 - **PIE re-entry**: world references change immediately after PIE starts — any cached world handles in MCP tool state must be invalidated.
 - **Log pagination**: `tail_output_log` paginates the editor's Output Log file using a byte-offset cursor (max 256 KB per call, line cap `max_lines`). Long spans can be fetched incrementally using the returned `cursor` — the full log is never dumped into Claude's context.
 

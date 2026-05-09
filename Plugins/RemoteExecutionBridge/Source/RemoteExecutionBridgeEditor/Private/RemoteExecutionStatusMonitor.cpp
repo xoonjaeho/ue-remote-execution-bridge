@@ -29,6 +29,10 @@ bool FRemoteExecutionStatusMonitor::OnTick(float DeltaTime)
 	if (NewStatus != CurrentStatus)
 	{
 		CurrentStatus = NewStatus;
+		if (NewStatus == ERemoteExecutionStatus::Disconnected)
+		{
+			URemoteExecutionBridgeLibrary::ClearConnectedSession();
+		}
 		OnStatusChanged.Broadcast(NewStatus);
 	}
 

@@ -4,6 +4,9 @@
 #include "Engine/Blueprint.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "K2Node_CallFunction.h"
+#include "ScopedTransaction.h"
+
+#define LOCTEXT_NAMESPACE "RemoteExecutionBridgeEditor"
 
 TArray<UEdGraph*> UBlueprintEditorUtilityLibrary::GetBlueprintGraphs(UBlueprint* Blueprint)
 {
@@ -40,6 +43,7 @@ void UBlueprintEditorUtilityLibrary::DeleteBlueprintNode(UBlueprint* Blueprint, 
 		return;
 	}
 
+	const FScopedTransaction Transaction(LOCTEXT("DeleteBlueprintNode", "Delete Blueprint Node"));
 	FBlueprintEditorUtils::RemoveNode(Blueprint, Node, /*bDontRecompile=*/true);
 }
 
@@ -85,3 +89,5 @@ TArray<UEdGraphNode*> UBlueprintEditorUtilityLibrary::FindNodesByFunctionName(UB
 
 	return Result;
 }
+
+#undef LOCTEXT_NAMESPACE

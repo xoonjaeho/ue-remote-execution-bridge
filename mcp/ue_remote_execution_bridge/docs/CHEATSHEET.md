@@ -2,29 +2,25 @@
 
 Frequently-called `unreal.*` APIs used via the `run_python` MCP tool, with signatures, examples, and usage counts.
 
-> **Heads up — Python API escape hatch.** When a needed symbol is missing from `unreal.*` (typical sign: `AttributeError: module 'unreal' has no attribute …`), do not chase a Python workaround past two attempts. Add a `UFUNCTION` to the companion C++ plugin (`Plugins/RemoteExecutionBridge/` in this repo) and call it from Python. Recipe and UFUNCTION catalog: [mcp README §C++ Plugin Extension](../README.md#c-plugin-extension-python-api-escape-hatch). System overview and naming map: [repo root README §How it works](../../../README.md#how-it-works).
+> **Python API escape hatch.** When `unreal.*` is missing a symbol, don't loop on Python workarounds — add a `UFUNCTION` to `Plugins/RemoteExecutionBridge/`. Recipe and catalog: [mcp README §C++ Plugin Extension](../README.md#c-plugin-extension-python-api-escape-hatch).
 
 ## How this file is maintained
 
-Incremental aggregation. The Frequency table rows are the persistent state; `usage.log` is an ephemeral delta.
+Frequency table rows = persistent state. `usage.log` = ephemeral delta. `update_cheatsheet.py` extracts `unreal.X.Y` patterns and folds them in:
 
-1. `server.py::run_python` appends every invocation to `mcp/ue_remote_execution_bridge/usage.log` (timestamp + raw code).
-2. When asked (e.g. "update CHEATSHEET from usage.log"), Claude extracts `unreal.X.Y` patterns via regex/AST and produces a delta (per-API count + last-seen).
-3. Merge rules:
-   - Existing row + delta → `Count` += delta count; `Last seen` ← delta date (overwrite).
-   - New API in delta → append new row.
-   - Row not present in delta → keep unchanged.
-4. Truncate `usage.log` to zero bytes after the merge is committed. The delta is now folded into the table; the raw log is no longer needed.
+- Existing row → `Count` += delta; `Last seen` ← delta date.
+- New API → append row.
+- Row absent from delta → unchanged.
 
-Internal `start_pie` / `stop_pie` / `tail_output_log` snippets bypass logging (they call `_run` directly), so counts reflect user-driven usage only.
+`--truncate-usage` clears the raw log after a verified merge. Internal `start_pie`/`stop_pie`/`tail_output_log` bypass logging, so counts reflect user usage only.
 
 ## Frequency table
 
-_Last aggregated: never. Empty template — populate by using the server and asking Claude to "fold usage.log into CHEATSHEET"._
+_Empty — populated by `update_cheatsheet.py` after server usage._
 
 | API | Count | Last seen | Notes |
 |---|---:|---|---|
-| _empty_ | — | — | Run a few `run_python` calls, then ask Claude to update this table from `usage.log`. |
+| _empty_ | — | — | — |
 
 ## Common snippets
 
@@ -66,10 +62,7 @@ for cls, cnt in class_counts.most_common(20):
 
 ### RemoteExecutionBridge C++ plugin APIs
 
-These APIs are exposed via `Plugins/RemoteExecutionBridge/` — NOT part of the standard `unreal` module. Split across two UE modules (both load automatically with the editor):
-
-- **`RemoteExecutionBridge`** (runtime) — `RemoteExecutionBridgeLibrary` (heartbeat, session metadata)
-- **`RemoteExecutionBridgeEditor`** (editor-only) — `BlueprintEditorUtilityLibrary`, `MaterialEditorUtilityLibrary`
+Custom plugin APIs (not stock `unreal.*`). Full UFUNCTION catalog: [mcp README §C++ Plugin Extension](../README.md#c-plugin-extension-python-api-escape-hatch).
 
 #### Blueprint graph traversal
 

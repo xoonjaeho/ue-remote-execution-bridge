@@ -102,3 +102,26 @@ FString URemoteExecutionBridgeLibrary::GetConnectedParentName()
 	FScopeLock Lock(&GConnectedParentNameLock);
 	return GConnectedParentName;
 }
+
+void URemoteExecutionBridgeLibrary::ClearConnectedSession()
+{
+	{
+		FScopeLock Lock(&GNodeIdLock);
+		GConnectedNodeId.Empty();
+	}
+	GActiveSessions.store(0, std::memory_order_relaxed);
+	GPid.store(0, std::memory_order_relaxed);
+	GPpid.store(0, std::memory_order_relaxed);
+	{
+		FScopeLock Lock(&GCwdLock);
+		GCwd.Empty();
+	}
+	{
+		FScopeLock Lock(&GConnectedStartTimeLock);
+		GConnectedStartTime.Empty();
+	}
+	{
+		FScopeLock Lock(&GConnectedParentNameLock);
+		GConnectedParentName.Empty();
+	}
+}
