@@ -42,4 +42,5 @@ public:
 	static FString GetConnectedStartTime();
 	static FString GetConnectedParentName();
 	static int32   GetActiveSessions();
+	static void    ClearConnectedSession();
 };

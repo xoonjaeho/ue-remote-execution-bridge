@@ -62,6 +62,31 @@ def _resolve_log_path() -> Path:
     return _build(fallback)
 
 
+def _resolve_project_stem() -> str:
+    """Derive the .uproject stem (project name) from CWD or UE_PROJECT_ROOT.
+
+    Resolution order matches _resolve_log_path():
+    1. UE_PROJECT_ROOT env var — if it points to a valid project dir, use its stem.
+    2. Walk upward from CWD looking for a *.uproject file.
+    3. Fallback: CWD directory name.
+    """
+    env = os.environ.get("UE_PROJECT_ROOT")
+    if env:
+        root = Path(env).resolve()
+        uprojects = sorted(root.glob("*.uproject"))
+        if root.is_dir() and uprojects:
+            return uprojects[0].stem
+        _log.warning("UE_PROJECT_ROOT=%s is not a valid UE project directory.", env)
+
+    cwd = Path(_CWD).resolve()
+    for parent in list(cwd.parents)[:7]:
+        uprojects = sorted(parent.glob("*.uproject"))
+        if uprojects:
+            return uprojects[0].stem
+
+    return cwd.name
+
+
 LOG_PATH = _resolve_log_path()
 USAGE_LOG_PATH = Path(__file__).parent / "usage.log"
 DISCOVERY_TIMEOUT = 5.0
@@ -69,7 +94,7 @@ EAGER_DISCOVERY_TIMEOUT = 2.0
 MAX_TAIL_BYTES = 256 * 1024
 
 _INSTRUCTIONS = """\
-Runs Python inside a live Unreal Editor 5.7 via PythonScriptPlugin Remote Execution.
+Runs Python inside a live Unreal Editor (developed against 5.7) via PythonScriptPlugin Remote Execution.
 
 - The editor must be running. On `No Unreal Editor discovered within 5s`, stop and ask the user to launch it — do not retry in a loop.
 - `run_python` code is appended to `usage.log` in plaintext. Never pass credentials through `code`.
@@ -85,6 +110,7 @@ mcp = FastMCP("ue_remote_execution_bridge", instructions=_INSTRUCTIONS)
 _PID = os.getpid()
 _PPID = os.getppid()
 _CWD = os.getcwd()
+_PROJECT_STEM = _resolve_project_stem()
 _START_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 _usage_lock = threading.Lock()
@@ -98,6 +124,13 @@ _usage_lock = threading.Lock()
 # argtypes/restype are mandatory: HANDLE is 8 bytes on x64 and ctypes
 # defaults to c_int, which truncates the pointer.
 # ---------------------------------------------------------------------------
+if sys.platform != "win32":
+    raise RuntimeError(
+        "ue_remote_execution_bridge currently supports Windows only. "
+        "The server uses Win32 named mutexes (CreateMutexW) and the UE plugin "
+        'declares SupportedTargetPlatforms: ["Win64"].'
+    )
+
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _kernel32.CreateMutexW.restype = ctypes.c_void_p
 _kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
@@ -216,6 +249,22 @@ _SESSION_LOCK_FILE.write_text(str(_PID), encoding="utf-8")
 _session_announced = False  # written True after the first successful heartbeat
 
 
+def _select_node(nodes: list[dict], project_stem: str) -> dict | None:
+    """Pick the node whose project matches *project_stem*, or None if no match."""
+    for node in nodes:
+        # Prefer project_root (normalized path stem) over project_name.
+        proj_root = node.get("project_root")
+        if proj_root:
+            stem = Path(proj_root).resolve().name.rstrip("/\\")
+            if stem == project_stem:
+                return node
+        # Fallback: project_name field from pong data.
+        proj_name = node.get("project_name")
+        if proj_name and proj_name == project_stem:
+            return node
+    return None
+
+
 def _open_remote(timeout: float) -> tuple[RemoteExecution, str] | None:
     """Discover UE and open a command connection. Returns (remote, node_id) or None."""
     remote = RemoteExecution(RemoteExecutionConfig())
@@ -227,7 +276,22 @@ def _open_remote(timeout: float) -> tuple[RemoteExecution, str] | None:
         if not remote.remote_nodes:
             remote.stop()
             return None
-        node_id = remote.remote_nodes[0]["node_id"]
+        while time.monotonic() < deadline and not _select_node(remote.remote_nodes, _PROJECT_STEM):
+            time.sleep(0.05)
+        nodes = remote.remote_nodes
+        _log.info("_PROJECT_STEM=%r, discovered %d node(s): %s", _PROJECT_STEM, len(nodes),
+                  [n.get("project_root", n.get("project_name", "?")) for n in nodes])
+        # Prefer the node whose project matches the workspace, even when only one
+        # editor is up — picking the wrong project silently sends commands to it.
+        match = _select_node(nodes, _PROJECT_STEM)
+        if match:
+            _log.info("Selected node matching project %r: %s", _PROJECT_STEM,
+                      match.get("project_root", match.get("project_name", "?")))
+            node_id = match["node_id"]
+        else:
+            if len(nodes) > 1:
+                _log.info("No node matches project %r, falling back to first discovered.", _PROJECT_STEM)
+            node_id = nodes[0]["node_id"]
         remote.open_command_connection(node_id)
         return remote, node_id
     except Exception:
@@ -453,6 +517,19 @@ _LOG_LINE_RE = re.compile(
     r"^\[(?P<ts>[^\]]+)\]\[\s*\d+\](?P<category>[^:]+):\s*(?:(?P<verb>Warning|Error|Fatal|Display|Verbose|VeryVerbose):\s*)?(?P<msg>.*)$"
 )
 
+_FILTER_REGEX_MAX_LEN = 256
+
+
+def _validate_filter_regex(pattern: str) -> re.Pattern[str]:
+    # Length cap blocks the cheapest catastrophic-backtracking payloads
+    # (long alternations / nested quantifiers). Compilation surfaces obvious
+    # syntax errors as a clean ValueError instead of crashing inside re.search.
+    if len(pattern) > _FILTER_REGEX_MAX_LEN:
+        raise ValueError(
+            f"filter_regex too long ({len(pattern)} > {_FILTER_REGEX_MAX_LEN})."
+        )
+    return re.compile(pattern)
+
 
 @mcp.tool()
 def tail_output_log(
@@ -487,14 +564,24 @@ def tail_output_log(
     with f:
         f.seek(0, 2)
         file_size = f.tell()
-        start = (
-            since_offset
-            if since_offset is not None
-            else max(0, file_size - MAX_TAIL_BYTES)
-        )
-        start = max(0, min(start, file_size))
+        if since_offset is not None and since_offset > file_size:
+            # Log was rotated/truncated under us; the old cursor points past EOF.
+            # Reset to the start of the new file rather than clamp to EOF (which
+            # would silently skip the entire rotated file).
+            start = 0
+        elif since_offset is not None:
+            start = max(0, since_offset)
+        else:
+            start = max(0, file_size - MAX_TAIL_BYTES)
         f.seek(start)
         raw = f.read(MAX_TAIL_BYTES)
+
+    # Trim a partial trailing line so we never emit a half-decoded record and
+    # never re-emit its remainder on the next call. If no newline was read,
+    # fall through with the raw buffer as-is (single very long line case).
+    last_newline = raw.rfind(b"\n")
+    if last_newline != -1 and last_newline + 1 < len(raw):
+        raw = raw[: last_newline + 1]
 
     next_cursor = start + len(raw)
     bytes_truncated = next_cursor < file_size
@@ -502,7 +589,7 @@ def tail_output_log(
     text = raw.decode("utf-8", errors="replace")
     lines = text.splitlines()
     if filter_regex:
-        pat = re.compile(filter_regex)
+        pat = _validate_filter_regex(filter_regex)
         lines = [ln for ln in lines if pat.search(ln)]
 
     lines_truncated = len(lines) > max_lines

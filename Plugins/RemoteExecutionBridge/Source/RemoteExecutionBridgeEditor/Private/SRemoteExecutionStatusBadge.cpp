@@ -81,18 +81,21 @@ FText SRemoteExecutionStatusBadge::GetTooltipText() const
 		: FString::Printf(TEXT("%d"), Ttl);
 
 	const int32 ActiveSessions = URemoteExecutionBridgeLibrary::GetActiveSessions();
-	const FString SessionsStr = FString::Printf(TEXT("%d"), FMath::Max(1, ActiveSessions));
+	const FString SessionsStr = (CurrentStatus == ERemoteExecutionStatus::Connected)
+		? FString::Printf(TEXT("%d"), FMath::Max(1, ActiveSessions))
+		: FString(TEXT("0"));
 
 	const uint32 EditorPid = FPlatformProcess::GetCurrentProcessId();
 	const FString EditorPidStr = FString::Printf(TEXT("%u"), EditorPid);
 	const FString EditorPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
 
-	const FString NodeId = URemoteExecutionBridgeLibrary::GetConnectedNodeId();
+	const bool bConnected = (CurrentStatus == ERemoteExecutionStatus::Connected);
+	const FString NodeId = bConnected ? URemoteExecutionBridgeLibrary::GetConnectedNodeId() : FString();
 	const FString NodeStr = NodeId.IsEmpty() ? FString(TEXT("—")) : NodeId;
 
-	const int32 McpPid = URemoteExecutionBridgeLibrary::GetConnectedPid();
-	const int32 McpPpid = URemoteExecutionBridgeLibrary::GetConnectedPpid();
-	const FString McpParentName = URemoteExecutionBridgeLibrary::GetConnectedParentName();
+	const int32 McpPid = bConnected ? URemoteExecutionBridgeLibrary::GetConnectedPid() : 0;
+	const int32 McpPpid = bConnected ? URemoteExecutionBridgeLibrary::GetConnectedPpid() : 0;
+	const FString McpParentName = bConnected ? URemoteExecutionBridgeLibrary::GetConnectedParentName() : FString();
 	FString McpPidStr;
 	if (McpPid == 0)
 	{
@@ -104,10 +107,10 @@ FText SRemoteExecutionStatusBadge::GetTooltipText() const
 		McpPidStr = FString::Printf(TEXT("%d (parent : %d, %s)"), McpPid, McpPpid, *ParentNameStr);
 	}
 
-	const FString StartTime = URemoteExecutionBridgeLibrary::GetConnectedStartTime();
+	const FString StartTime = bConnected ? URemoteExecutionBridgeLibrary::GetConnectedStartTime() : FString();
 	const FString StartedStr = StartTime.IsEmpty() ? FString(TEXT("—")) : StartTime;
 
-	const FString Cwd = URemoteExecutionBridgeLibrary::GetConnectedCwd();
+	const FString Cwd = bConnected ? URemoteExecutionBridgeLibrary::GetConnectedCwd() : FString();
 	const FString ProjectStr = Cwd.IsEmpty() ? FString(TEXT("—")) : FPaths::GetPathLeaf(Cwd);
 
 	return FText::FromString(FString::Printf(
