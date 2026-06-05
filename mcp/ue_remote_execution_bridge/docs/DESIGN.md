@@ -339,11 +339,30 @@ Module selection for new UFUNCTIONs: runtime UE APIs → `RemoteExecutionBridge`
 
 See the table in `../README.md §Existing UFUNCTION catalog` (SoT). Extension procedure: `../README.md §C++ Plugin Extension`.
 
+### 4.8 Editor↔Workspace Identity and Connection Selection (ADR)
+
+**Problem.** With multiple editors and/or Claude sessions on one host, the server attached to the first editor that answered multicast discovery (`nodes[0]`), so commands could reach the wrong project.
+
+**Why not filter at discovery time.** The discovery pong's `data` payload is built by the engine's `PythonScriptRemoteExecution.cpp` and is opaque to the vendored client; it carries only a per-session UUID — no project name or `.uproject` path. Injecting a project marker would require modifying engine source (non-distributable, version-fragile) — rejected.
+
+**Decision.** Verify identity *after* connecting, using the stock Python API:
+
+- For each discovered editor, open the command channel and eval `unreal.Paths.get_project_file_path()`; compare the `.uproject` filename stem (case-insensitive) to the server's `_PROJECT_STEM` (from `UE_PROJECT_ROOT`, else the nearest `*.uproject` from cwd, else *unresolved*). No C++ change; the probe is read-only.
+- **Strict refuse**: no matching editor → return an actionable error rather than attaching to a foreign one. `UE_BRIDGE_ALLOW_ANY=1` restores legacy first-node behavior. Pinning is `UE_PROJECT_ROOT`.
+- **Inconclusive ≠ mismatch**: a probe that can't read identity (editor mid-boot, Python not ready) is retryable, never converted into a refusal of the correct editor.
+- **Ambiguity**: two editors reporting the same stem → refuse (pin to disambiguate). Identity is compared by stem, not full path — junction/symlink layouts make `Path.resolve()` of the editor's path and the server-resolved path diverge, so full-path equality would yield false negatives. Same-stem-in-different-directories is an accepted limitation, surfaced as an ambiguity refusal rather than a silent wrong pick.
+- **Decision cache (matches only)**: keyed on the *settled* set of discovered editor ids (UUIDs are per session, so an unchanged set means the same editors are up). A matched editor still present skips re-probe; the heartbeat/tool path stays fast in steady state. A non-match is deliberately NOT cached — the discovered set can momentarily lag a slow editor's first pong, so a non-match is always re-probed rather than frozen into a stale refusal.
+
+**Safety property.** Refusing cross-workspace connects prevents misrouted mutating commands — a meaningful guard given Remote Execution has no authentication (§5). The selection policy is a pure module (`matching.py`) with unit tests; the I/O probe is injected.
+
+**Discovery settle.** Multiple editors ARE discoverable concurrently on the shared loopback group — but only if the client waits for all pongs. Snapshotting on the first responder surfaces just one editor (non-deterministically, which looks like a "one editor at a time" limit but is a measurement artifact). A short settle (`_DISCOVERY_SETTLE`) after the first editor appears, before the set is read, fixes this: the settled set keys both the cache and the probe, so each session reliably matches its own editor among several (verified with two editors up — both discovered every round, each cwd matched its own project). So the shared multicast group suffices for concurrent multi-editor; per-project endpoints are not required for loopback.
+
 ---
 
 ## 5. Security and Operational Notes
 
 - **Remote Execution has no authentication.** Any client in multicast range can connect and execute arbitrary Python. Set `RemoteExecutionMulticastTtl=0` to prevent packets from leaving the local machine.
+- **Workspace isolation**: in auto mode the server attaches only to the editor whose project matches its workspace and refuses otherwise (§4.8), so a session never sends commands to another project's editor. Pin with `UE_PROJECT_ROOT`; `UE_BRIDGE_ALLOW_ANY=1` disables the guard.
 - **Firewall**: Windows Defender will prompt to allow UDP 6766 and the editor's TCP listen port at least once. Allow only on the Private network profile.
 - **Do not share on shared machines**: leaving this configuration on a public machine or conference room PC exposes the editor to anyone on the same LAN segment. Always keep TTL=0.
 - **Editor restart resilience**: on TCP disconnect, the next call retries once + re-discovers. See §4.2 and the [MCP README §Connection Lifecycle](../README.md#connection-lifecycle) for details.

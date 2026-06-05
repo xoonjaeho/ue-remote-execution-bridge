@@ -29,6 +29,7 @@ from execute import (
     MODE_EXEC_STATEMENT,
     MODE_EVAL_STATEMENT,
 )
+from matching import decide_node, parse_project_path
 
 
 def _resolve_log_path() -> Path:
@@ -52,6 +53,14 @@ def _resolve_log_path() -> Path:
             return _build(root)
         _log.warning("UE_PROJECT_ROOT=%s is not a UE project directory; falling back to auto-detect.", env)
 
+    # Prefer CWD (where Claude Code launched = the UE project root), checking the
+    # directory itself before its parents. Robust under junctioned mcp/ layouts
+    # where Path(__file__).resolve() escapes into the canonical plugin repo.
+    cwd = Path(os.getcwd()).resolve()
+    for d in (cwd, *list(cwd.parents)[:7]):
+        if any(d.glob("*.uproject")):
+            return _build(d)
+
     here = Path(__file__).resolve()
     for parent in list(here.parents)[:7]:
         if any(parent.glob("*.uproject")):
@@ -62,13 +71,14 @@ def _resolve_log_path() -> Path:
     return _build(fallback)
 
 
-def _resolve_project_stem() -> str:
+def _resolve_project_stem() -> str | None:
     """Derive the .uproject stem (project name) from CWD or UE_PROJECT_ROOT.
 
-    Resolution order matches _resolve_log_path():
+    Resolution order:
     1. UE_PROJECT_ROOT env var — if it points to a valid project dir, use its stem.
-    2. Walk upward from CWD looking for a *.uproject file.
-    3. Fallback: CWD directory name.
+    2. Walk from CWD (the directory itself, then its parents) for a *.uproject.
+    3. None — workspace unresolved. Auto-connect refuses rather than attaching to an
+       arbitrary editor (a coincidental cwd basename must not masquerade as a project).
     """
     env = os.environ.get("UE_PROJECT_ROOT")
     if env:
@@ -79,18 +89,24 @@ def _resolve_project_stem() -> str:
         _log.warning("UE_PROJECT_ROOT=%s is not a valid UE project directory.", env)
 
     cwd = Path(_CWD).resolve()
-    for parent in list(cwd.parents)[:7]:
-        uprojects = sorted(parent.glob("*.uproject"))
+    for d in (cwd, *list(cwd.parents)[:7]):
+        uprojects = sorted(d.glob("*.uproject"))
         if uprojects:
             return uprojects[0].stem
 
-    return cwd.name
+    _log.warning("No *.uproject resolved from cwd=%s; workspace UNRESOLVED "
+                 "(auto-connect will refuse). Set UE_PROJECT_ROOT to pin.", cwd)
+    return None
 
 
 LOG_PATH = _resolve_log_path()
 USAGE_LOG_PATH = Path(__file__).parent / "usage.log"
 DISCOVERY_TIMEOUT = 5.0
 EAGER_DISCOVERY_TIMEOUT = 2.0
+# After the first editor appears, wait briefly so near-simultaneous editors' pongs all
+# land before reading the discovered set (the set keys the cache AND drives probing) —
+# otherwise whichever editor pongs first wins, non-deterministically.
+_DISCOVERY_SETTLE = 0.25
 MAX_TAIL_BYTES = 256 * 1024
 
 _INSTRUCTIONS = """\
@@ -111,6 +127,9 @@ _PID = os.getpid()
 _PPID = os.getppid()
 _CWD = os.getcwd()
 _PROJECT_STEM = _resolve_project_stem()
+# Opt-out escape hatch: restore legacy "attach to the first discovered editor"
+# behavior when no editor matches the workspace. Default off (strict refuse).
+_ALLOW_ANY = os.environ.get("UE_BRIDGE_ALLOW_ANY") == "1"
 _START_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 _usage_lock = threading.Lock()
@@ -249,24 +268,43 @@ _SESSION_LOCK_FILE.write_text(str(_PID), encoding="utf-8")
 _session_announced = False  # written True after the first successful heartbeat
 
 
-def _select_node(nodes: list[dict], project_stem: str) -> dict | None:
-    """Pick the node whose project matches *project_stem*, or None if no match."""
-    for node in nodes:
-        # Prefer project_root (normalized path stem) over project_name.
-        proj_root = node.get("project_root")
-        if proj_root:
-            stem = Path(proj_root).resolve().name.rstrip("/\\")
-            if stem == project_stem:
-                return node
-        # Fallback: project_name field from pong data.
-        proj_name = node.get("project_name")
-        if proj_name and proj_name == project_stem:
-            return node
-    return None
+# Connection decision cache, keyed on the discovered node-id SET. Steady-state
+# heartbeats/tool-calls with an unchanged editor set skip re-probing. UUID node ids
+# are per editor session, so an unchanged set means the same editors are up and the
+# prior decision still holds (an editor restart yields a new id → set changes →
+# cache invalidates). Accessed only under the UE mutex (serialized), so no extra lock.
+_conn_decision: dict[str, Any] | None = None
 
 
-def _open_remote(timeout: float) -> tuple[RemoteExecution, str] | None:
-    """Discover UE and open a command connection. Returns (remote, node_id) or None."""
+def _probe_project_path(remote: RemoteExecution) -> str | None:
+    """Eval the *currently connected* editor's .uproject path.
+
+    Returns the path string, or None when identity can't be read (eval failed,
+    editor mid-boot, empty result). None is *inconclusive*, NOT "wrong project".
+    """
+    try:
+        result = remote.run_command(
+            "unreal.Paths.get_project_file_path()",
+            unattended=True,
+            exec_mode=MODE_EVAL_STATEMENT,
+            raise_on_failure=False,
+        )
+    except Exception:
+        return None
+    if not result or not result.get("success"):
+        return None
+    return parse_project_path(result.get("result"))
+
+
+def _open_remote(timeout: float) -> tuple[RemoteExecution, str] | str | None:
+    """Discover UE, verify project identity, connect to the MATCHING editor only.
+
+    Returns:
+        (remote, node_id) — connected to the editor whose project matches the workspace
+        str               — a refusal reason (actionable; surfaced to tool callers)
+        None              — no editor discovered at all
+    """
+    global _conn_decision
     remote = RemoteExecution(RemoteExecutionConfig())
     try:
         remote.start()
@@ -276,24 +314,98 @@ def _open_remote(timeout: float) -> tuple[RemoteExecution, str] | None:
         if not remote.remote_nodes:
             remote.stop()
             return None
-        while time.monotonic() < deadline and not _select_node(remote.remote_nodes, _PROJECT_STEM):
-            time.sleep(0.05)
-        nodes = remote.remote_nodes
-        _log.info("_PROJECT_STEM=%r, discovered %d node(s): %s", _PROJECT_STEM, len(nodes),
-                  [n.get("project_root", n.get("project_name", "?")) for n in nodes])
-        # Prefer the node whose project matches the workspace, even when only one
-        # editor is up — picking the wrong project silently sends commands to it.
-        match = _select_node(nodes, _PROJECT_STEM)
-        if match:
-            _log.info("Selected node matching project %r: %s", _PROJECT_STEM,
-                      match.get("project_root", match.get("project_name", "?")))
-            node_id = match["node_id"]
-        else:
-            if len(nodes) > 1:
-                _log.info("No node matches project %r, falling back to first discovered.", _PROJECT_STEM)
-            node_id = nodes[0]["node_id"]
-        remote.open_command_connection(node_id)
-        return remote, node_id
+
+        # Let near-simultaneous editors' pongs all land before reading the set, so both the
+        # cache key and the probe see the FULL editor set — not whichever editor happened to
+        # pong first. Keyed on this settled set, the cache hits reliably in steady state.
+        settle = min(_DISCOVERY_SETTLE, deadline - time.monotonic())
+        if settle > 0:
+            time.sleep(settle)
+        node_ids = [n["node_id"] for n in remote.remote_nodes]
+        current = frozenset(node_ids)
+        project_stem = _PROJECT_STEM
+
+        def _refuse_no_match(n: int) -> str:
+            return (
+                f"No UE editor for workspace {project_stem!r} "
+                f"({n} other-project editor(s) ignored). "
+                "Open this project's editor, or set UE_PROJECT_ROOT to pin."
+            )
+
+        def _connect(node_id: str) -> tuple[RemoteExecution, str] | str:
+            """Open the command connection to the chosen editor. A transient connect-back
+            failure becomes a retryable refusal, never a false 'no editor discovered'."""
+            try:
+                remote.open_command_connection(node_id)
+            except Exception:
+                remote.stop()
+                return "Matched the workspace editor but the command connection dropped; retry shortly."
+            return remote, node_id
+
+        # Decision cache (matches only, keyed on the settled editor-id set) — a matched
+        # editor still present skips re-probe. No-match is intentionally NOT cached: the
+        # discovered set can lag a slow editor's first pong, so we always re-probe a
+        # non-match rather than freeze a premature refusal.
+        if _conn_decision is not None and _conn_decision["node_set"] == current:
+            outcome = _conn_decision["outcome"]
+            if outcome in current:
+                return _connect(outcome)
+
+        if project_stem is None:
+            remote.stop()
+            return (
+                f"Workspace has no resolvable .uproject (cwd={_CWD}); refusing to attach "
+                "to an arbitrary editor. Launch from the UE project root or set UE_PROJECT_ROOT."
+            )
+
+        # Probe each discovered editor's project identity. An open / connect-back failure is
+        # INCONCLUSIVE, not fatal — one slow or flaky editor must not discard a valid match.
+        def _probe(node_id: str) -> str | None:
+            try:
+                remote.open_command_connection(node_id)
+                return _probe_project_path(remote)
+            except Exception:
+                return None
+            finally:
+                try:
+                    remote.close_command_connection()
+                except Exception:
+                    pass
+
+        matched, status = decide_node(node_ids, project_stem, _probe)
+        _log.info("workspace=%r, %d editor(s) discovered, decision=%s",
+                  project_stem, len(node_ids), status)
+
+        if status == "match":
+            assert matched is not None
+            _conn_decision = {"node_set": current, "outcome": matched}
+            return _connect(matched)
+
+        if status == "ambiguous":
+            remote.stop()
+            return (
+                f"Multiple UE editors report project {project_stem!r}. "
+                "Set UE_PROJECT_ROOT to disambiguate."
+            )
+
+        if status == "inconclusive":
+            # An editor is present but its project identity isn't readable yet
+            # (mid-boot / Python not ready). Don't cache; let the caller retry.
+            remote.stop()
+            return (
+                "UE editor(s) discovered but project identity is not readable yet "
+                "(editor still initializing?). Retry shortly."
+            )
+
+        # no_match
+        if _ALLOW_ANY:
+            _log.warning(
+                "UE_BRIDGE_ALLOW_ANY=1: connecting to first of %d non-matching editor(s).",
+                len(node_ids),
+            )
+            return _connect(node_ids[0])
+        remote.stop()
+        return _refuse_no_match(len(node_ids))
     except Exception:
         try:
             remote.stop()
@@ -313,8 +425,8 @@ def _try_heartbeat() -> None:
         if not _PARENT_NAME:
             _PARENT_NAME = _query_process_name(_PPID)
         result = _open_remote(EAGER_DISCOVERY_TIMEOUT)
-        if result is None:
-            return
+        if not isinstance(result, tuple):
+            return  # None (no editor) or str (refused workspace) — skip heartbeat
         remote, node_id = result
         try:
             active = _count_active_sessions()
@@ -360,7 +472,11 @@ def _heartbeat_loop() -> None:
         _try_heartbeat()
 
 
-threading.Thread(target=_heartbeat_loop, daemon=True).start()
+def _start_heartbeat() -> None:
+    """Start the background heartbeat thread. Called from __main__ only, so that
+    importing this module (e.g. in tests) does not spawn a thread that mutates the
+    connection-decision cache underneath the test."""
+    threading.Thread(target=_heartbeat_loop, daemon=True).start()
 
 
 _MUTEX_ACQUIRE_TIMEOUT_MS = 15000
@@ -386,6 +502,8 @@ def _ue_connection() -> Generator[RemoteExecution, None, None]:
                 "Is the editor running with PythonScriptPlugin + "
                 "bRemoteExecution=True, and multicast 239.0.0.1:6766 reachable?"
             )
+        if isinstance(result, str):
+            raise RuntimeError(result)  # refused: wrong workspace / unresolved / ambiguous
         remote, node_id = result
         try:
             remote.run_command(
@@ -621,4 +739,5 @@ def tail_output_log(
 
 
 if __name__ == "__main__":
+    _start_heartbeat()
     mcp.run()

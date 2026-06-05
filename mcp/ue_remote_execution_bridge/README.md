@@ -68,22 +68,48 @@ For graph-mutating UFUNCTIONs (`RemoveNode`, pin-link edits, etc.), wrap the mut
 
 ## Workspace-Aware Editor Matching
 
-When multiple UE editors answer Remote Execution discovery, the server prefers the editor whose pong data matches the MCP workspace project.
+The server attaches only to the UE editor whose *project* matches its workspace, and
+**refuses** otherwise — so commands never reach the wrong project when several editors or
+Claude sessions run at once.
 
-Selection inputs:
+How it works (auto mode):
 
-1. `_PROJECT_STEM` is resolved once at server startup from `UE_PROJECT_ROOT`, then by walking upward from the MCP process cwd for a `*.uproject`, then by falling back to the cwd directory name.
-2. Each discovered UE node is checked by `project_root` first (`Path(project_root).resolve().name`), then by `project_name`.
-3. If the first discovered node does not match, discovery continues until the requested timeout expires or a matching node appears.
-4. If no node matches by timeout, the server falls back to the first discovered node.
+1. `_PROJECT_STEM` is resolved once at startup: `UE_PROJECT_ROOT` if set, else the nearest
+   `*.uproject` walking from the MCP process cwd (the directory itself, then its parents).
+   If none is found the workspace is **unresolved** and every auto-connect is refused — a
+   coincidental cwd name must not pose as a project.
+2. UE's discovery pong carries no project identity (only a per-session UUID), so the server
+   verifies *after* connecting: for each discovered editor it opens the command channel and
+   evaluates `unreal.Paths.get_project_file_path()`, comparing the `.uproject` filename stem
+   (case-insensitive) to `_PROJECT_STEM`. The probe is read-only; a non-matching editor is
+   left untouched (no heartbeat, no green badge).
+3. Outcomes: **match** → connect; **no match** → refuse with an actionable error; **two
+   editors report the same project** → refuse as ambiguous (pin with `UE_PROJECT_ROOT`);
+   **identity not readable yet** (editor mid-boot) → retry, never a false refuse.
+4. The decision is cached on the *set* of discovered editor ids — steady-state heartbeats and
+   tool calls don't re-probe until an editor appears or disappears.
 
-This is project matching, not arbitrary editor selection. The server does not parse user prompts such as "connect to PID 2968"; UE editor PID is not part of the current pong data. To target another project, restart the MCP server from that project workspace or set `UE_PROJECT_ROOT` before startup.
+**Pinning.** Set `UE_PROJECT_ROOT` (absolute path) to fix the target project explicitly; the
+same matching is enforced against the pinned stem.
 
-**Verifying the match.** With multiple editors running, call `tail_output_log(filter_regex="MCP")` after the first heartbeat — the connect line's project name must match the workspace's `.uproject` stem.
+**Escape hatch.** `UE_BRIDGE_ALLOW_ANY=1` restores the legacy "attach to the first discovered
+editor" behavior (default off). Use only when you knowingly want any editor.
+
+This is project matching, not arbitrary editor selection — the server does not parse prompts
+like "connect to PID 2968" (PID is not in the pong). To target another project, launch the
+MCP server from that workspace or set `UE_PROJECT_ROOT`.
+
+**Verifying the match.** `run_python("unreal.Paths.get_project_file_path()", mode="eval_statement")`
+returns the connected editor's `.uproject` — its stem must equal your workspace's.
+
+> Multiple editors are discoverable concurrently on the shared loopback group as long as the
+> server waits for all pongs (a short settle after the first responder). Each session then
+> matches its own editor among several. If your workspace's editor isn't among those
+> discovered, the server refuses rather than connecting to another project's editor.
 
 ## Connection Lifecycle
 
-- **Eager connect**: 2-second discovery on server startup. Connects immediately if the editor is running; skips silently otherwise.
+- **Eager connect**: 2-second discovery on server startup. Connects immediately if a *matching* editor is running; skips silently otherwise (including when only non-workspace editors are up — see Workspace-Aware Editor Matching).
 - **Per-call connect**: Each tool call opens a fresh UDP discovery + TCP handshake (~100–200 ms overhead) and closes the connection when the call completes. Connection reuse is deferred to a later revision.
 - A single `[MCP] ue_remote_execution_bridge server connected` line is written to the editor Output Log on the first successful heartbeat (not repeated per tool call, to avoid spam).
 - If the editor is not reachable, the call returns an error immediately.
