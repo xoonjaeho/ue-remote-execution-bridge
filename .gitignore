@@ -24,3 +24,8 @@ mcp/ue_remote_execution_bridge/.sessions/
 # Root-anchored: nested distributable docs (e.g. mcp/.../docs/) stay tracked.
 /.claude/
 /docs/
+
+# >>> scaffolds >>>
+# Serena MCP writes this on project activation
+.serena/
+# <<< scaffolds <<<
