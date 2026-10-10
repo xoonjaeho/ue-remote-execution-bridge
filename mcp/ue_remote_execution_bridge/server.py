@@ -19,7 +19,7 @@ from typing import Any, Generator
 
 _log = logging.getLogger(__name__)
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer as FastMCP
 
 sys.path.insert(0, str(Path(__file__).parent))
 from execute import (
