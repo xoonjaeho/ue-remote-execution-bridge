@@ -114,11 +114,11 @@ Runs Python inside a live Unreal Editor (developed against 5.7) via PythonScript
 
 - The editor must be running. On `No Unreal Editor discovered within 5s`, stop and ask the user to launch it — do not retry in a loop.
 - `run_python` code is appended to `usage.log` in plaintext. Never pass credentials through `code`.
-- After any asset mutation, call `tail_output_log` with the previous `next_offset` to confirm side-effects. Silent success is not success.
+- After any asset mutation, call `tail_output_log` with the previous call's `cursor` as `since_offset` to confirm side-effects. Silent success is not success.
 
 When `unreal.*` lacks a symbol (typical sign: `AttributeError: module 'unreal' has no attribute …`), the companion C++ plugin `Plugins/RemoteExecutionBridge/` shipped with this MCP is the intended extension path — add a `UFUNCTION`, rebuild, call as `unreal.<Class>.<method>(...)`. Don't spend more than two pure-Python workarounds on the same goal. Catalog + recipe: `mcp/ue_remote_execution_bridge/README.md §C++ Plugin Extension`.
 
-Deeper reference: `mcp/ue_remote_execution_bridge/README.md`, `docs/DESIGN.md`, `docs/CHEATSHEET.md`.
+Deeper reference: `mcp/ue_remote_execution_bridge/README.md`, `mcp/ue_remote_execution_bridge/docs/DESIGN.md`, `mcp/ue_remote_execution_bridge/docs/CHEATSHEET.md`.
 """
 
 mcp = FastMCP("ue_remote_execution_bridge", instructions=_INSTRUCTIONS)
@@ -621,13 +621,22 @@ else:
 
 @mcp.tool()
 def start_pie() -> dict[str, Any]:
-    """Start a Play-In-Editor session in the running editor."""
+    """Request a Play-In-Editor session in the running editor.
+
+    Returns once the request is queued, not once PIE is up; stdout reads
+    "PIE start requested", or "PIE already running; no-op". Same result dict
+    as run_python.
+    """
     return _run(_START_PIE_CODE, MODE_EXEC_FILE, unattended=True)
 
 
 @mcp.tool()
 def stop_pie() -> dict[str, Any]:
-    """End the current PIE session."""
+    """Request the end of the current Play-In-Editor session.
+
+    Returns once the request is queued; stdout reads "PIE end requested", or
+    "PIE not running; no-op". Same result dict as run_python.
+    """
     return _run(_STOP_PIE_CODE, MODE_EXEC_FILE, unattended=True)
 
 
@@ -665,8 +674,9 @@ def tail_output_log(
         max_lines: Cap on returned lines (most recent kept when truncating).
 
     Returns a dict with lines (parsed when possible), cursor (next offset),
-    truncated (bool), and log_path. Each call reads at most MAX_TAIL_BYTES;
-    follow the cursor to paginate longer spans.
+    truncated (bool), and log_path. Each call reads at most 256 KiB; follow
+    the cursor to paginate longer spans. A since_offset past the end of the
+    file (the log was rotated) restarts from its beginning.
     """
     try:
         f = open(LOG_PATH, "rb")
