@@ -17,13 +17,8 @@ public class RemoteExecutionBridgeEditor : ModuleRules
 			"Engine",
 			"Slate",
 			"SlateCore",
-			"UnrealEd",
 			"ToolMenus",
-			"LevelEditor",
-			"Projects",
 			"RemoteExecutionBridge",
-			"BlueprintGraph",
-			"Kismet",
 		});
 	}
 }

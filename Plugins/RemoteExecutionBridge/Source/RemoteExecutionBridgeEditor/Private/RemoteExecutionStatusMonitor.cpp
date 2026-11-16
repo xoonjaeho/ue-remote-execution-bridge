@@ -1,8 +1,24 @@
 #include "RemoteExecutionStatusMonitor.h"
 #include "RemoteExecutionBridgeLibrary.h"
 
+namespace
+{
+	// Heartbeat interval is 2s; allow up to 6 missed beats before marking Disconnected.
+	// This prevents false negatives when another session holds the mutex for several seconds.
+	constexpr double BridgeTimeoutSeconds = 12.0;
+
+	[[nodiscard]] bool IsHeartbeatFresh(double LastHeartbeatTime, double TimeoutSeconds)
+	{
+		if (LastHeartbeatTime <= 0.0)
+		{
+			return false;
+		}
+		return (FPlatformTime::Seconds() - LastHeartbeatTime) < TimeoutSeconds;
+	}
+}
+
 FRemoteExecutionStatusMonitor::FRemoteExecutionStatusMonitor()
-	: CurrentStatus(ERemoteExecutionStatus::Disconnected)
+	: bBridgeConnected(false)
 {
 	TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
 		FTickerDelegate::CreateRaw(this, &FRemoteExecutionStatusMonitor::OnTick),
@@ -15,26 +31,22 @@ FRemoteExecutionStatusMonitor::~FRemoteExecutionStatusMonitor()
 	FTSTicker::GetCoreTicker().RemoveTicker(TickerHandle);
 }
 
+bool FRemoteExecutionStatusMonitor::IsBridgeConnected()
+{
+	return IsHeartbeatFresh(URemoteExecutionBridgeLibrary::GetLastHeartbeatTime(), BridgeTimeoutSeconds);
+}
+
 bool FRemoteExecutionStatusMonitor::OnTick(float DeltaTime)
 {
-	const double LastHeartbeat = URemoteExecutionBridgeLibrary::GetLastHeartbeatTime();
-	const double Elapsed = (LastHeartbeat > 0.0)
-		? (FPlatformTime::Seconds() - LastHeartbeat)
-		: TNumericLimits<double>::Max();
+	const bool bNewBridgeConnected = IsBridgeConnected();
 
-	const ERemoteExecutionStatus NewStatus = (Elapsed < TimeoutSeconds)
-		? ERemoteExecutionStatus::Connected
-		: ERemoteExecutionStatus::Disconnected;
-
-	if (NewStatus != CurrentStatus)
+	if (bNewBridgeConnected == bBridgeConnected)
 	{
-		CurrentStatus = NewStatus;
-		if (NewStatus == ERemoteExecutionStatus::Disconnected)
-		{
-			URemoteExecutionBridgeLibrary::ClearConnectedSession();
-		}
-		OnStatusChanged.Broadcast(NewStatus);
+		return true;
 	}
+
+	bBridgeConnected = bNewBridgeConnected;
+	OnStatusChanged.Broadcast();
 
 	return true;
 }

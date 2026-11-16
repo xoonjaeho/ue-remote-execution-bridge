@@ -1,8 +1,13 @@
 {
   "mcpServers": {
-    "ue_remote_execution_bridge": {
+    "ue-remote-execution-bridge": {
       "command": "python",
-      "args": ["mcp/ue_remote_execution_bridge/server.py"]
+      "args": [
+        "mcp/ue_remote_execution_bridge/src/server.py"
+      ],
+      "env": {
+        "UE_PROJECT_ROOT": "."
+      }
     }
   }
 }

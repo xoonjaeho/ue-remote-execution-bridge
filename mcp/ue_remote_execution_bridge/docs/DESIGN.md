@@ -1,379 +1,291 @@
-# External Control of UE Python API — Remote Execution and Transport Selection
+# ue-remote-execution-bridge Design Document
 
-## 1. Overview
+Protocol details and architecture decision records (ADR).
 
-This document describes how to invoke Unreal Engine 5.7's Python API from an **external process (here, Claude)**. Two goals:
+---
 
-- Programmatic creation and modification of `.uasset` files (materials, blueprints, levels, sequences, etc.)
-- Editor runtime control — Play-In-Editor (PIE) start/stop, Output Log streaming, world and actor manipulation
+## 1. Protocol — UDP discovery + TCP command
 
-There is exactly one practical channel for driving Python from outside UE: the **Remote Execution** protocol (official name: the Remote Execution feature of `PythonScriptPlugin`, corresponding to the `Enable Remote Execution` checkbox in UE Project Settings → Plugins → Python). This document explains the protocol first, then compares three external invocation approaches (Bash · MCP · commandlet), and finally describes the **MCP server** architecture this project adopts and the rationale behind it.
+UE's PythonScriptPlugin Remote Execution works over two channels.
 
-> In this document "Remote Execution" refers only to this PythonScriptPlugin feature — do not confuse it with the separate **Remote Control** plugin.
+### UDP multicast discovery (port 6766)
 
-### 1.1 Naming map
+```
+Python(MCP) ──── UDP broadcast ────► UE editor (239.0.0.1:6766)
+               "open_connection" message
+```
 
-This project ships two cooperating halves under three related names — all point at the same system. See the [repo root README §How it works](../../../README.md#how-it-works) for the end-to-end data flow.
+- Requires `bRemoteExecution=True` and `RemoteExecutionMulticastGroupEndpoint=239.0.0.1:6766` in `Config/DefaultEngine.ini`
+- `RemoteExecutionMulticastBindAddress=127.0.0.1`, `RemoteExecutionMulticastTtl=0` — local loopback only
+- Buffer size: `RemoteExecutionSendBufferSizeBytes=2097152`, `RemoteExecutionReceiveBufferSizeBytes=2097152` (2 MiB; prevents the `Remote party failed to send a valid response!` error when a payload exceeds the default)
 
-| Name | Kind | Where |
+### TCP command channel (inverted model)
+
+```
+Python(MCP) ◄─── reverse TCP connection ──── UE editor
+  (TCP server, listen)
+```
+
+- Python listens on a TCP socket → UE receives the UDP message and connects back over TCP
+- Once connected, Python sends a `run_command` message → UE runs the Python code → returns the result
+- `src/execute.py` = verbatim copy of Epic's official `remote_execution.py` (renamed only to avoid an import-path collision — see `NOTICE` at the repository root)
+
+---
+
+## 2. Connection lifecycle (ADR-01)
+
+**Decision: per-call fresh connection (UDP discovery + TCP handshake + close on every call)**
+
+| Option | Pros | Cons |
 |---|---|---|
-| `ue-remote-execution-bridge` | Repo / MCP server id (`.mcp.json`) | This repo, `mcp/ue_remote_execution_bridge/server.py` |
-| `RemoteExecutionBridge`, `RemoteExecutionBridgeEditor` | C++ UE modules | `Plugins/RemoteExecutionBridge/Source/` |
-| `unreal.RemoteExecutionBridgeLibrary`, `unreal.BlueprintEditorUtilityLibrary`, `unreal.MaterialEditorUtilityLibrary` | Python bindings generated from the C++ UFUNCTIONs | Called from `run_python` payloads |
+| **per-call fresh** (chosen) | No stale node_id after an editor restart; simple code | 100–200 ms extra latency per call |
+| Reuse the connection | Lower latency | Stale node_id cache; complex reconnect logic |
 
-The C++ plugin is also the designed **Python API escape hatch** — when `unreal.*` lacks a symbol, add a UFUNCTION. See §4.7 and [mcp README §C++ Plugin Extension](../README.md#c-plugin-extension-python-api-escape-hatch).
-
----
-
-## 2. Remote Execution Protocol
-
-### 2.1 Location and Activation Conditions
-
-This is a built-in feature provided by `PythonScriptPlugin`. The following must be satisfied:
-
-- Editor must be **running** — commandlet/headless mode is not supported
-- `PythonScriptPlugin` must be enabled
-- `bRemoteExecution=True` must be set in the `[/Script/PythonScriptPlugin.PythonScriptPluginSettings]` section of `Config/DefaultEngine.ini`
-
-Epic's distributed **reference client**:
-
-```
-<UE>/Engine/Plugins/Experimental/PythonScriptPlugin/Content/Python/remote_execution.py
-```
-
-A pure Python module with no external dependencies. Most external tools (Houdini, Maya, VSCode extensions, etc.) use this module as-is or wrap it thinly.
-
-### 2.2 Two-Channel Architecture
-
-```
-┌─ External Process ────────────┐              ┌─ UE Editor (PythonScriptPlugin) ──┐
-│                               │   UDP mcast  │                                    │
-│  remote_execution.py          │──239.0.0.1:6766──▶  node broadcast (pong)        │
-│    .start()                   │              │                                    │
-│    .open_command_connection() │              │                                    │
-│                               │   TCP cmd    │                                    │
-│    .run_command(python_code) ─┼─────────────▶│  editor Python interpreter        │
-│       <── JSON response ──────┼─────────────▶│  (stdout / stderr / result)       │
-└───────────────────────────────┘              └────────────────────────────────────┘
-```
-
-- **UDP channel**: multicast group `239.0.0.1:6766` (default). The external client sends a `ping`; the editor replies with a `pong` containing its node ID and TCP endpoint. Multiple editor instances on the same machine can be distinguished.
-- **TCP channel**: a 1:1 connection to the discovered node. Python code is sent as a JSON message and the execution result is returned.
-
-### 2.3 Message Format and Execution Modes
-
-Messages are UTF-8 JSON. Key fields:
-
-| Field | Description |
-|---|---|
-| `version` | Protocol version (currently `1`) |
-| `magic` | `"ue_py"` signature |
-| `source` / `dest` | Node IDs (UUID) |
-| `type` | `ping`, `pong`, `open_connection`, `close_connection`, `command`, `command_result` |
-| `data` | Type-specific payload |
-
-The execution mode is specified in the `data` of a `command` message:
-
-- **`ExecuteFile`** — treats the given string as a file and executes it at top level. Multiple statements and function definitions are permitted; no return value.
-- **`ExecuteStatement`** — executes a single statement; no return value.
-- **`EvaluateStatement`** — evaluates a single expression; returns the result as a repr string.
-
-All three modes capture stdout and stderr and include them in the response.
-
-### 2.4 State Persistence (global scope)
-
-Independently of `exec_mode`, the **execution context** can be selected:
-
-- `ExecuteInGlobalScope=True` — all calls share the same `__main__` namespace. Variables and functions created in previous calls persist. Beneficial for interactive/session-style workflows.
-- `ExecuteInGlobalScope=False` — each call runs in an isolated scope. Guarantees isolation with fewer side effects.
-
-**Current implementation note**: Epic's distributed `remote_execution.py` (copied into this repo as `execute.py`) does not include the `ExecuteInGlobalScope` field in the protocol message → UE uses its default (global scope). To expose this as a tool parameter, `execute.py::_RemoteExecutionCommandConnection.run_command`'s `data` dictionary would need to be extended, or an upstream Epic update would be needed. Currently unexposed.
-
-### 2.5 Constraints and Caveats
-
-- **Editor required.** Without a running editor, the bridge simply does not exist.
-- **PIE world UObject access.** On PIE start, the editor world is duplicated into a separate PIE world. The default `get_editor_world()` cannot reach actors in the PIE world. Iterate worlds with `unreal.ObjectIterator(unreal.World)` and select the PIE world (`is_play_in_editor() == True`). Properties, function calls, actor spawn/destroy in that world are all accessible from Python.
-- **Multicast-blocked environments.** Strict VPNs, containers, or isolated virtual NICs may block UDP multicast. A workaround fork (fixing the node address via an environment variable inside the MCP server) may be needed in such cases.
-- **No authentication.** Anyone in multicast range can connect and execute arbitrary Python → restrict to localhost only (TTL=0 strongly recommended).
-- **Buffer sizes.** Returning large results (e.g., a full level dump) requires `RemoteExecutionSend/ReceiveBufferSizeBytes` to be set to 2 MiB or more to avoid message truncation.
-
-### 2.6 Active Configuration Example
-
-`.uproject` Plugins entries are listed in the [root README §Install Step 4](../../../README.md#install).
-
-`Config/DefaultEngine.ini`:
-
-```ini
-[/Script/PythonScriptPlugin.PythonScriptPluginSettings]
-bDeveloperMode=True
-bRemoteExecution=True
-RemoteExecutionMulticastGroupEndpoint=239.0.0.1:6766
-RemoteExecutionMulticastBindAddress=127.0.0.1
-RemoteExecutionSendBufferSizeBytes=2097152
-RemoteExecutionReceiveBufferSizeBytes=2097152
-RemoteExecutionMulticastTtl=0
-```
-
-- `bDeveloperMode=True` enables Python stub generation and hot-reload convenience features.
-- `RemoteExecutionMulticastTtl=0` **prevents packets from leaving the local machine** — the secure default.
-- `RemoteExecutionMulticastBindAddress=127.0.0.1` also restricts to localhost (`0.0.0.0` binds all NICs — makes the editor reachable from any multicast-capable segment).
+**Why**: The mutex already serializes concurrent sessions, so the benefit of caching shrinks. Against UE Python execution time (hundreds of ms to several seconds), 100–200 ms of overhead is acceptable.
 
 ---
 
-## 3. Comparison of External Invocation Methods
+## 3. Serializing concurrent sessions
 
-Three external invocation methods can sit on top of the Remote Execution protocol.
+### Win32 named mutex
 
-### 3.1 Bash + Python Client (stateless)
-
-```
-Claude ─(Bash tool)─▶ python ue_run.py "<python code>"
-                            │
-                            └─(UDP discover + TCP send)─▶ UE Editor
-```
-
-Each call executes a single Python script via Bash. The script uses `remote_execution.py` to discover → send command → print result → exit.
-
-- **Advantages**
-  - Minimal implementation. A single `ue_run.py` file is enough to start.
-  - No MCP server installation or process management needed.
-  - Direct stdout output makes debugging easy.
-- **Disadvantages**
-  - UDP discovery cost on every call (hundreds of milliseconds).
-  - Claude does not recognize it as a "tool" — no schema or validation.
-  - Difficult to maintain session state (process dies every call; protocol options exist but are cumbersome).
-  - Long results are dumped raw into Claude's context.
-
-### 3.2 MCP Server (adopted)
-
-```
-Claude ─(MCP protocol, stdio)─▶ ue_remote_execution_bridge server (resident) ─(TCP persistent)─▶ UE Editor
-                   ▲
-                   │ tool: run_python, start_pie, stop_pie, tail_output_log
+```python
+# Local\UE_RemoteExecution_Bridge
+_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\UE_RemoteExecution_Bridge")
+ctypes.windll.kernel32.WaitForSingleObject(_mutex, 15_000)  # 15 s timeout
+# ... run the command ...
+ctypes.windll.kernel32.ReleaseMutex(_mutex)
 ```
 
-A resident MCP server process **maintains** the TCP session with UE and exposes named tools to Claude.
+- A `run_python` call from a second Claude Code session waits until the first session's TCP command finishes
+- `argtypes` / `restype` must be set explicitly to avoid corrupting the x64 HANDLE (8 bytes)
 
-- **Advantages**
-  - Claude recognizes tool schemas → parameter validation, auto-suggestions, consistent calling convention.
-  - Per-call connect latency is ~100–200 ms (UDP discovery + TCP handshake); connection reuse is a planned future optimization.
-  - Results can be processed server-side — long log tails, error formatting, context savings.
-  - State is preserved (Python global scope, recent error cache, subscriptable log streams).
-  - Features requiring a persistent connection (e.g., real-time PIE log tailing) are natural to implement.
-- **Disadvantages**
-  - One additional process to manage (Claude Code `.mcp.json` registration, reconnect logic on restart).
-  - Requires a decision: adopt existing open source or build in-house.
-  - Bugs in the server itself add a debugging layer.
+### Session lock files
 
-### 3.3 Commandlet Mode (reference)
+- `src/.sessions/<PID>.lock` files track live server processes
+- Deleted automatically by an `atexit` handler when the server exits
+- Leftover files from force-killed (kill) processes are cleaned up on the next startup by reaping dead PIDs
+
+---
+
+## 4. Tool catalog (SoT)
+
+> When a signature changes, edit this table first.
+
+PIE start/stop, Output Log queries, asset search/save/move, and DataTable queries are not in this server — use the toolsets of Epic's official unreal-mcp (the ModelContextProtocol plugin) built into UE 5.8 and later. This server handles what the official toolsets can't do (arbitrary Python, virtual PIE input, BP graph refactoring).
+
+| Tool | Parameters (defaults) | Description |
+|---|---|---|
+| `run_python` | `code: str`, `mode: "exec_file"\|"exec_statement"\|"eval_statement" = "exec_file"`, `unattended: bool = True` | Run Python in the editor. Only `eval_statement` returns a value |
+| `list_scripts` | — | List the script files registered in `scripts/` |
+| `list_ue_nodes` | `discovery_timeout: float = 15.0` | List running UE editor instances and show the current target |
+| `select_ue_node` | `node_id: str` | Pin the session to a specific UE editor instance (kept until restart) |
+| `clear_ue_node` | — | Clear the node pin and return to env UE_NODE_ID or workspace-filter auto-selection |
+| `update_cheatsheet` | `dry_run: bool = False` | Merge the `src/usage.log` delta into the `docs/CHEATSHEET.md` frequency table, then truncate (§8) |
+| `replace_custom_event_with_bie` | `wbp_path: str`, `dry_run: bool = False`, `save: bool = True` | Replace a WBP Custom Event with an override event node of the same-named native BIE (migrates wiring and split sub-pins; rolls back on mismatch/failure). save is gated on the actual compile state plus no name collision. JSON `{replaced, skipped, rolled_back, warnings, compiled, saved, has_name_collision, message}` |
+| `find_external_event_callers` | `target_wbp: str`, `function_names: list[str]` | (read-only) Detect cross-asset call sites that would break because the replaced event is called from outside (risky = BIE && !BlueprintCallable). No automatic fixing. JSON `{risky_functions, safe_functions, confirmed_callers, possible_callers, candidates_scanned, limitations, message}` |
+| `simulate_pointer_input` | `action: "click"\|"drag"\|"long_press"`, `position: [x,y]`, `backend: "slate"\|"viewport" = "slate"`, `button: str = "LeftMouseButton"`, `to_position: [x,y]\|None = None`, `hold_seconds: float = 1.0`, `steps: int = 8` | Inject a PIE mouse pointer (Backend A/B). long_press is composed from a Down script → this server process's own sleep(hold_seconds) → an Up script (so the UE game thread never blocks). Coordinates are viewport-local pixels, the same for both backends. Coordinate-based mouse is not supported by Backend C (AutomationDriver) (§9) — use backend='viewport' if needed. JSON click/drag `{success, handled, message}`, long_press `{success, down, up}` |
+| `simulate_key_input` | `key: str`, `action: "down"\|"up"\|"char"\|"focus_viewport"`, `backend: "slate"\|"viewport" = "slate"` | Inject PIE keyboard input (Backend A/B). backend='viewport' does not support action='char' (raw keys only). action='focus_viewport' moves focus to the PIE viewport before injecting gameplay keys (do not call it when typing into a text field — it steals focus). JSON `{success, handled, message}` |
+| `run_driver_sequence` | `steps: list[dict]`, `timeout_seconds: float = 10.0` | Asynchronously kicks off a Backend C (AutomationDriver) keyboard sequence, then waits for completion with a non-blocking poll loop (host-side sleep interval) before returning — to the caller it looks like a synchronous tool. steps actions: press/release/press_chord/type/wait. enable_automation_driver is required beforehand (fails explicitly when disabled, no crash). JSON `{success, handle, done, sequence_success, message}` |
+| `enable_automation_driver` | `auto_disable_seconds: float = 30.0` | Enable Backend C (reference-counted). Blocks real HW input while enabled. When the timeout elapses, only this Enable's share is released automatically (other sessions are unaffected). JSON `{success, generation, message}` — remember the generation to release exactly this share on disable |
+| `disable_automation_driver` | `generation: int = 0` | Release one Backend C reference (it is actually disabled only when the count reaches 0). With generation, releases exactly that Enable call's share; when omitted (0), releases one arbitrary live generation (legacy compatibility). JSON `{success, message}` |
+
+---
+
+## 5. Security
+
+Remote Execution has **no authentication**. Always keep the following settings.
+
+- `RemoteExecutionMulticastTtl=0` — multicast packets never leave the local machine
+- `RemoteExecutionMulticastBindAddress=127.0.0.1` — restricted to the loopback interface
+- Do not use on shared PCs or LANs. Disable `bRemoteExecution=True` in any environment where it can't be guaranteed to stay local-only
+
+`run_python` code is stored in plaintext in `src/usage.log`. Do not put secrets or credentials in code.
+
+---
+
+## 6. C++ plugin — two-module structure
+
+`Plugins/RemoteExecutionBridge/`
+
+| Module | Load phase | Role |
+|---|---|---|
+| `RemoteExecutionBridge` | Default | Heartbeat reception and session metadata (`URemoteExecutionBridgeLibrary`); virtual PIE input — Backend A/Slate (`URemoteExecutionBridgeSlateInputLibrary`), Backend B/GameViewportClient (`URemoteExecutionBridgeViewportInputLibrary`), Backend C/AutomationDriver keyboard only (`URemoteExecutionBridgeAutomationDriverLibrary`) |
+| `RemoteExecutionBridgeEditor` | PostEngineInit | LevelEditor toolbar status badge (`SRemoteExecutionStatusBadge`, `FRemoteExecutionStatusMonitor`) |
+
+### Toolbar badge
+
+- A ● dot widget is shown on the right side of the LevelEditor toolbar
+- Green if an MCP server heartbeat arrived within the last 12 seconds, red otherwise
+- The MCP server's heartbeat thread calls the `URemoteExecutionBridgeLibrary::Heartbeat()` UFUNCTION every 2 seconds to update the state
+
+**Tooltip format** (shown on hover):
 
 ```
-Claude ─(Bash)─▶ UnrealEditor-Cmd.exe <uproject> -run=pythonscript -script=foo.py
+Remote Execution Bridge
+Status: Connected / Disconnected
+Sessions: N
+Heartbeat: N.Ns ago
+Endpoint: 239.0.0.1:6766
+TTL: 0 (local only)
+UE
+PID: {editor PID}
+Node: {node_id}
+Path: {project .uproject path}
+MCP
+PID: {MCP server PID} ({process name})
+PPID: {parent PID} ({parent process name})
+Path: {MCP server CWD}
+Started: {start time}
+Project: {last segment of CWD}
+Branch: {git branch}
 ```
 
-Runs a Python script as a commandlet process without launching the editor.
+- `UE.PID`: `FPlatformProcess::GetCurrentProcessId()` — the editor's own PID (read directly in C++)
+- `UE.Node`: the connected node_id passed in from MCP (`unknown` when not connected)
+- `UE.Path`: the editor's project file path (`FPaths::GetProjectFilePath`) — always shown regardless of connection. Separate from the MCP path (below)
+- `MCP.PID`/`MCP.PPID`: the connected session's PID and parent PID. The image name is resolved on the editor side with `FPlatformProcess::GetApplicationName(pid)` (no MCP protocol change). The same binary (claude.exe) has the same name, so tell sessions apart by Branch, Path, and PID
+- `MCP.Path`: the MCP server CWD (`GetConnectedCwd` — pushed at connection time)
+- Connection-dependent fields (Node, MCP.*, Started, Project, Branch) are updated only when there is exactly one active session — this prevents flapping from sessions overwriting each other (`unknown` when not updated)
 
-- **Advantages**: works without a running editor. Suitable for CI and batch workloads.
-- **Disadvantages**
-  - Full editor subsystem boot on every call → tens of seconds or more.
-  - **PIE is not supported** — play sessions cannot run in commandlet mode.
-  - A separate code path unrelated to Remote Execution — no state persistence.
+### Workspace routing isolation (multi-editor)
 
-→ **Not suitable** for interactive, iterative sessions with Claude. Consider only for long-running batch import or build tasks.
+When UE editors from several workspaces run at the same time, **every discovery path (heartbeat + per-call execution)** is scoped by `project_root` so commands don't go to the wrong workspace.
 
-### 3.4 Scenario Summary
+**Target selection priority** (`_discover_node`, when `preferred_node_id is None`):
 
-| Scenario | Bash | MCP | commandlet |
+1. A `select_ue_node()` session pin or env `UE_NODE_ID` → connect straight to that node_id (bypasses the filter and guard — the user picked that editor on purpose)
+2. No pin → route to the editor whose pong response `project_root` matches `UE_PROJECT_ROOT` (resolved to an absolute path)
+3. **No guessing without a discriminator**: if there are two or more nodes and no match (or pin), it does not pick `remote_nodes[0]`; it lists the candidates and **fails (raises)**. This closes the path that silently leaks into another workspace
+
+- `UE_PROJECT_ROOT` is resolved to an absolute path relative to the `.mcp.json` directory (independent of cwd changes), and compared with the Windows-safe `os.path.normcase + normpath` (ignores case, trailing slashes, and separators). `resolve()` is not used so that nonexistent paths (other drives) can still be compared
+- **Second guard** (`_assert_workspace`): right after connecting, if the editor's live `unreal.Paths.project_dir()` differs from `UE_PROJECT_ROOT`, any command is aborted before it runs. This is the last line of defense even when the discovery pong is stale or false (skipped when an explicit pin is used)
+- **Re-pinning**: when a pinned editor restarts, it gets a new node_id. If a pin and `UE_PROJECT_ROOT` are both present and the pin isn't found, it searches again with the same workspace filter and updates the pin to the new id
+- With several editors up at once, the pongs sometimes don't all return within 5 seconds, so the default discovery timeout is 15 seconds
+- `list_ue_nodes`'s `selection_source`/`is_current_routing_target` reflect the same rules: `session`/`env`/`workspace-filter`/`single`/`unresolved`
+
+### Procedure for adding a new UFUNCTION
+
+1. **Pick a module**: runtime UE API → `RemoteExecutionBridge`; editor-only engine API → `RemoteExecutionBridgeEditor`
+2. Edit the header and source: add `UFUNCTION(BlueprintCallable, Category="RemoteExecutionBridge")`
+3. Add Build.cs dependencies (e.g. `FBlueprintEditorUtils` → `"Kismet"`, `UEditorEngine` → `"UnrealEd"`)
+4. Build: Live Coding (`Ctrl+Alt+F11`) when only a function body changed; full build + editor restart when a new declaration is added
+5. Verify + update the §7 catalog
+
+---
+
+## 7. UFUNCTION catalog (SoT)
+
+> When something changes, edit this table first.
+
+| Module | Class | Python call | Purpose |
 |---|---|---|---|
-| One-off "change material parameter and save" | ◯ | ◯ | △ (slow boot) |
-| Bulk asset rename requiring dozens of calls | △ | ◎ | △ |
-| Start PIE and stream live logs | △ | ◎ | ✕ |
-| Manual one-off test | ◎ | △ | ✕ |
-| Delegate ongoing UE control to Claude | △ | ◎ | ✕ |
-| Nightly CI content import automation | △ | △ | ◎ |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeSlateInputLibrary` | `unreal.RemoteExecutionBridgeSlateInputLibrary.viewport_to_absolute_position(world_context, viewport_position) -> Vector2D` | PIE viewport pixel coordinates → desktop absolute coordinates (converts a ProjectWorldToScreen result into click coordinates) |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeSlateInputLibrary` | `unreal.RemoteExecutionBridgeSlateInputLibrary.simulate_pointer_down/up(world_context, viewport_position, button) -> bool` | Inject a pointer button Down/Up separately at viewport-local coordinates (FSlateApplication::ProcessMouseButtonDownEvent/UpEvent). Down registers a C++ watchdog (15 s one-shot) in case the matching Up is lost; it is cancelled automatically when the Up arrives |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeSlateInputLibrary` | `unreal.RemoteExecutionBridgeSlateInputLibrary.simulate_click(world_context, viewport_position, button) -> bool` | Synchronous Down+Up composed click (completes within the same call — no watchdog needed) |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeSlateInputLibrary` | `unreal.RemoteExecutionBridgeSlateInputLibrary.simulate_drag(world_context, from_position, to_position, button, steps=8) -> bool` | From Down → Steps interpolated MoveEvents → To Up |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeSlateInputLibrary` | `unreal.RemoteExecutionBridgeSlateInputLibrary.simulate_click_on_widget(widget) -> bool` | Composed click at the widget center's desktop absolute coordinates — passes through the whole Slate hit test and routing |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeSlateInputLibrary` | `unreal.RemoteExecutionBridgeSlateInputLibrary.simulate_click_at_absolute_position(absolute_position) -> bool` | Inject a click at desktop absolute coordinates — for 3D hits (buildings, etc.) and arbitrary coordinates |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeSlateInputLibrary` | `unreal.RemoteExecutionBridgeSlateInputLibrary.inject_key_down/up(key) -> bool` | Inject a key Down/Up (ProcessKeyDownEvent/UpEvent). Routed to the widget (or viewport) that currently has keyboard focus — no automatic focus change. Return value = whether Slate actually consumed it (handled) |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeSlateInputLibrary` | `unreal.RemoteExecutionBridgeSlateInputLibrary.inject_key_char(text) -> bool` | Inject a string one character at a time as KeyChar events (EditableText, etc.). The target field must be given focus before the call, e.g. with simulate_click |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeSlateInputLibrary` | `unreal.RemoteExecutionBridgeSlateInputLibrary.focus_game_viewport() -> bool` | Explicitly move keyboard focus to the PIE game viewport (call before injecting gameplay keys). Do not call while typing into a text field (it steals focus) |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeViewportInputLibrary` | `unreal.RemoteExecutionBridgeViewportInputLibrary.set_pointer_position(world_context, viewport_position) -> bool` | Move the cursor with `FViewport::SetMouse`. Must be called before `inject_viewport_key` (SetMouse updates the cursor state synchronously) |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeViewportInputLibrary` | `unreal.RemoteExecutionBridgeViewportInputLibrary.inject_viewport_key(world_context, key, b_pressed) -> bool` | Shared Down/Up for mouse buttons and keyboard keys (`FInputKeyEventArgs::CreateSimulated`+`UGameViewportClient::InputKey`). Return value = actual handled. bPressed=true registers a watchdog in case the matching Up is lost |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeViewportInputLibrary` | `unreal.RemoteExecutionBridgeViewportInputLibrary.simulate_viewport_click(world_context, viewport_position, button) -> bool` | SetPointerPosition + synchronous Down+Up composed click |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeViewportInputLibrary` | `unreal.RemoteExecutionBridgeViewportInputLibrary.simulate_viewport_drag(world_context, from_position, to_position, button, steps=8) -> bool` | From Down → Steps interpolated SetPointerPosition moves → To Up |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeAutomationDriverLibrary` | `unreal.RemoteExecutionBridgeAutomationDriverLibrary.enable_automation_driver(auto_disable_seconds=30.0) -> int64` | Enable Backend C (generation-based reference count, R8 — one session's timeout/Disable can't turn off another session's Enable). Blocks real HW input while enabled. The return value is this call's generation — pass it unchanged to disable and exactly this call's share is released |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeAutomationDriverLibrary` | `unreal.RemoteExecutionBridgeAutomationDriverLibrary.disable_automation_driver(generation=0) -> bool` | Release one reference — `IAutomationDriverModule::Disable()` is actually called only when the count reaches 0. With a generation, releases exactly that generation (false if already released or nonexistent); with 0 (the default), releases one arbitrary live generation |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeAutomationDriverLibrary` | `unreal.RemoteExecutionBridgeAutomationDriverLibrary.run_driver_sequence(steps_json) -> str` | Asynchronously kicks off a keyboard-only sequence (JSON: press/release/press_chord/type/wait) and returns a GUID handle immediately. Returns an empty string when disabled (§9 crash pitfall) |
+| `RemoteExecutionBridge` | `URemoteExecutionBridgeAutomationDriverLibrary` | `unreal.RemoteExecutionBridgeAutomationDriverLibrary.poll_driver_sequence(handle) -> (bool, bool)\|None` | Non-blocking completion check. Python return: a `(bOutDone, bOutSuccess)` tuple when the handle is valid, `None` when invalid/exhausted (the bool return value itself is not included in the tuple — confirmed by measurement). Removed from the internal map immediately on completion (R7) |
+
+BP graph editing (adding nodes, connecting pins, compiling) was left out of this plugin because the official unreal-mcp Blueprint toolset covers it. If you need an engine API that the official toolsets lack, add a UFUNCTION following the procedure above.
 
 ---
 
-## 4. Adopted Architecture — MCP Server
+## 8. Usage logging + CHEATSHEET aggregation (ADR-02)
 
-### 4.1 Rationale
+### Decision: a simple delimiter format + the `update_cheatsheet` MCP tool
 
-The primary use case is Claude **iteratively** controlling UE. The benefits of context savings, state persistence, and tool schema exposure lead to choosing MCP.
+Initially the server pre-extracted `api_symbols` and stored them in JSONL, but putting the extraction logic in the server increased complexity (it depended on an external aggregation script).
 
-### 4.2 Structure
-
+The new format stores only the raw code in `src/usage.log`:
 ```
-┌─ Claude Code ─────────┐  stdio  ┌─ ue_remote_execution_bridge ───┐  TCP  ┌─ UE Editor ─────────────────────────┐
-│  tool_use calls       │◀──────▶ │  MCP SDK                       │◀─────▶│  PythonScript Plugin                │
-│                       │         │  execute.py                    │       │  unreal.* Python API                │
-│                       │         │                                │       │    ^ UFUNCTION reflection            │
-│                       │         │                                │       │  Plugins/RemoteExecutionBridge/     │
-│                       │         │                                │       │  |- RemoteExecutionBridge (runtime) │
-│                       │         │                                │       │  \- RemoteExecutionBridgeEditor     │
-└───────────────────────┘         └────────────────────────────────┘       └─────────────────────────────────────┘
+---
+2026-04-20T01:42:41.390241+00:00
+import unreal
+print(unreal.SystemLibrary.get_engine_version())
+---
 ```
 
-- Claude Code launches the `ue_remote_execution_bridge` server registered in `.mcp.json` via stdio.
-- Each tool call opens a fresh UDP discovery + TCP handshake and closes the connection when the call completes. Connection reuse is deferred to a later revision.
-- If the editor restarts, the server re-discovers and reconnects transparently.
-- UFUNCTIONs called via `unreal.*` inside `run_python` are registered by `Plugins/RemoteExecutionBridge/` — when the Python API reaches its limits, extend this plugin (→ 4.7).
+Aggregation is handled by the MCP tool `update_cheatsheet` — it extracts symbols with the regex `unreal\.[A-Za-z0-9_.]+`, merges them into the `docs/CHEATSHEET.md` frequency table, and truncates `src/usage.log`.
 
-### 4.3 Currently Implemented Tools
+---
 
-For the exposed tool list and signatures, see the table in `../../../README.md §MCP Tools` (SoT).
+## 9. PIE virtual input: three backends (ADR-03)
 
-A `global_scope` parameter was planned early in the design but is unexposed due to the protocol constraint described in §2.4.
+A feature that lets Claude inject mouse/keyboard input into PIE to verify interactions automatically.
 
-#### Future Extension Candidates (not yet implemented)
+### The three backends
 
-The following **are not implemented**. The same operations are achievable via `run_python`; if a repeated call pattern emerges, promotion to a dedicated tool is worth considering. Signatures are drafts and may change at implementation time.
-
-| Tool | Signature (draft) | Purpose |
-|---|---|---|
-| `create_asset` | `(package_path, asset_name, class_name, factory?, params?)` | Wrap `unreal.AssetTools.create_asset` |
-| `save_assets` | `(paths: list[str])` / `save_all_dirty()` | Save modified assets |
-| `list_assets` | `(path, recursive=True, class_filter?)` | Asset registry query |
-| `get_selection` / `set_selection` | `(paths: list[str])` | Content browser / viewport selection |
-| `list_actors` | `(level?, class_filter?)` | Enumerate world actors |
-
-### 4.4 Server Implementation Choice — Option A vs Option B
-
-#### Option A: Adopt an Existing Open-Source Server
-
-Key candidates as of the survey (2026-04 — star/commit figures are volatile; re-check before adoption):
-
-| Repository | Language | License | Tools | UE requirement | Notes |
-|---|---|---|---|---|---|
-| `runreal/unreal-mcp` | TS + Python hybrid | MIT | ~18 | Built-in PythonScriptPlugin (no extra plugin needed) | Mature tool schemas (`editor_list_assets`, `editor_run_python`, `editor_create_object`, screenshot/camera control, etc.). First release 2025-06, 96 stars |
-| `radial-hks/MCP-Unreal-Server` | Python | Apache-2.0 | Few (`run_python`-centric) | Built-in Python | ~7 commits, ~6 stars. Thin wrapper around multicast discovery |
-| `chongdashu/unreal-mcp` | Python | — | — | **Separate UE plugin required** | Explicitly EXPERIMENTAL. API may change significantly |
-| `kvick-games/UnrealMCP` | — | — | — | Custom plugin | Gameplay-oriented |
-
-- **Advantages**
-  - Immediately runnable (npx/uv/pip once)
-  - Tool schemas already designed — skip the "what to expose" question
-  - Active repos (`runreal`) have bug report/patch cycles
-- **Disadvantages**
-  - **External dependency and supply-chain risk** — when upstream stalls, you inherit the fork
-  - Cost of adapting tool schemas and error formats to this project's workflow
-  - Some (`chongdashu`, `kvick-games`) require a custom UE plugin → build pipeline impact
-  - Security model may differ from our requirements (localhost-only, TTL=0) — audit needed
-  - Most have few stars and contributors, no release tags → long-term maintenance uncertain
-
-#### Option B: Minimal In-House Implementation
-
-```
-mcp/ue_remote_execution_bridge/
-├─ server.py     # MCP SDK, stdio transport, tool definitions
-├─ execute.py    # Epic's remote_execution.py (renamed to avoid import-path collision)
-├─ README.md     # Quick-start
-├─ usage.log     # run_python invocation log (source for manual CHEATSHEET updates, gitignored)
-└─ docs/
-   ├─ DESIGN.md       # This document — protocol and ADR
-   └─ CHEATSHEET.md   # Frequently-used UE Python API reference (manually aggregated from usage.log)
-```
-
-Initial target: 4 tools (`run_python`, `start_pie`, `stop_pie`, `tail_output_log`). The server body was projected at 300–500 lines; `server.py` settled at approximately 300 lines.
-
-- **Advantages**
-  - Full ownership and understanding of the entire codebase — error format, log filtering, state cache are all customizable
-  - Shallow dependency tree (MCP SDK only). UE uses only the built-in `remote_execution.py`; no additional UE plugin installation
-  - Security policy (localhost, TTL=0) can be embedded as needed. `run_python` is unconstrained — there is no code-pattern allowlist; trust is inherited from the MCP client.
-  - Natural fit with the project's `mcp/` conventions and Python standards
-- **Disadvantages**
-  - Initial implementation and testing time (half a day to a day)
-  - Each additional tool requires in-house work (Option A has many already)
-  - Responsible for tracking MCP SDK updates and UE protocol changes
-
-#### Decision Criteria
-
-| Question | Favors A | Favors B |
-|---|---|---|
-| Need something running today? | ◎ | △ day's work |
-| More than 10 tools needed? | ◎ | △ implementation burden |
-| Error format / log filtering customization important? | △ upstream PR/fork | ◎ own code |
-| Sensitive to external dependencies / supply-chain security? | △ third-party audit | ◎ minimal deps |
-| Plan to ship this bridge in production long-term? | △ upstream lock-in | ◎ full ownership |
-| Resistance to extra UE plugin installation? | `runreal` OK, some ✕ | ◎ built-in only |
-
-#### Decision: Option B (in-house implementation)
-
-Chose **Option B** to minimize external dependencies and supply-chain risk, maintain full control over error formatting and log filtering, and align naturally with the project's `mcp/` conventions.
-
-Implementation scope:
-- Dependencies: `mcp` Python SDK + Epic's `remote_execution.py` (included as `execute.py`). One external dependency.
-- Initial 4 tools: `run_python`, `start_pie`, `stop_pie`, `tail_output_log`
-- Promote `create_asset` · `save_assets` · `list_assets` etc. to dedicated tools as repeated call patterns emerge
-- `runreal/unreal-mcp` used as **reference** for tool schema and response format design (MIT license → partial attribution if excerpted)
-
-> **Amendment (2026-04):** Subsequent Python API limitations (Slate notifications, Blueprint editor internal APIs, etc.) led to adding the in-repo C++ plugin `Plugins/RemoteExecutionBridge/`. Option B's premise of "minimal external dependencies, full ownership" is preserved — the plugin is versioned together with the repo. §4.6 describes the on-screen notification limitation that triggered the plugin. For extension procedures, see `../README.md §C++ Plugin Extension`.
-
-### 4.5 Claude Code Registration
-
-Registration is covered in the [root README §Install Step 5](../../../README.md#install). Operational notes (`UE_PROJECT_ROOT` override, `/mcp` reload) are in the [MCP README §MCP Registration](../README.md#mcp-registration).
-
-### 4.6 Notification Design Rationale
-
-Operational behavior (eager/per-call connect timings, Output Log line, reconnect semantics) is documented in the [MCP README §Connection Lifecycle](../README.md#connection-lifecycle). This section records *why* the chosen channels were chosen.
-
-**Viewport on-screen toasts were not adopted.** `unreal.SystemLibrary.print_string(..., print_to_screen=True)` goes through GEngine's `AddOnScreenDebugMessage` path, which only renders during PIE/Standalone world rendering — invisible when the editor is idle. Slate-native notifications (`FNotificationInfo` bottom-right toast) are not exposed in the UE 5.7 Python API — this limitation was one of the triggers for introducing `Plugins/RemoteExecutionBridge/`.
-
-The current approach combines an editor toolbar badge (`SRemoteExecutionStatusBadge`) with a single Output Log line on first connect (suppressed thereafter via the module-level `_session_announced` flag — resets only on MCP server restart, not on UE editor restart). If a toast becomes necessary in the future, a `FNotificationInfo` UFUNCTION can be added to the `RemoteExecutionBridgeEditor` module. Extension procedure: `../README.md §C++ Plugin Extension`.
-
-### 4.7 C++ Plugin Surface (RemoteExecutionBridge)
-
-An in-repo C++ plugin that exposes engine-internal APIs unreachable by the Python API. Source: `Plugins/RemoteExecutionBridge/`.
-
-**Two-module split**
-
-| Module | Type | Loading phase | Purpose |
+| Backend | C++ class | Path | Coverage |
 |---|---|---|---|
-| `RemoteExecutionBridge` | UncookedOnly | Default | MCP session state (heartbeat, metadata, toolbar badge data) |
-| `RemoteExecutionBridgeEditor` | Editor | PostEngineInit | Blueprint graph manipulation and other editor-only engine APIs |
+| A: Slate | `URemoteExecutionBridgeSlateInputLibrary` | `FSlateApplication::ProcessMouseButtonDownEvent/UpEvent/ProcessMouseMoveEvent/ProcessKeyDownEvent/UpEvent/ProcessKeyCharEvent` | Mouse (Down/Up/Click/Drag/widget click) + keyboard (Down/Up/Char text typing) |
+| B: GameViewportClient | `URemoteExecutionBridgeViewportInputLibrary` | `FViewport::SetMouse` + `UGameViewportClient::InputKey` (`FInputKeyEventArgs::CreateSimulated`) | Mouse (Click/Drag) + keyboard (raw keys only, no text typing) — reaches gameplay input (PlayerController, etc.) |
+| C: AutomationDriver | `URemoteExecutionBridgeAutomationDriverLibrary` | `IAsyncAutomationDriver` (async kickoff + poll) | **Keyboard only** (press/release/press_chord/type/wait) — coordinate-based mouse is not supported |
 
-`UncookedOnly` keeps the module out of cooked Shipping/Test targets by UBT definition — heartbeat UFUNCTIONs and session-metadata strings cannot leak into a packaged game binary, even without per-`.uproject` platform guards.
+**Coordinate contract**: the public A/B functions all take viewport-local pixel coordinates (so the caller's coordinate math doesn't change when switching backends).
 
-Module selection for new UFUNCTIONs: runtime UE APIs → `RemoteExecutionBridge`; editor-only APIs (`FBlueprintEditorUtils`, `GEditor`, Slate, etc.) → `RemoteExecutionBridgeEditor`.
+**Backend C scope reduction**: measurement showed that the coordinate space `IAsyncActionSequence::MoveByOffset` moves the cursor in is completely separate from the real cursor state that `FViewport::SetMouse` (Backend B) produces. If you need coordinate-based mouse click/drag, use Backend B (`simulate_viewport_click`/`simulate_viewport_drag`).
 
-**Current UFUNCTION catalog**
+### Core rules
 
-See the table in `../README.md §Existing UFUNCTION catalog` (SoT). Extension procedure: `../README.md §C++ Plugin Extension`.
+- **R1 (no blocking)**: Python remote execution runs synchronously inside a game-thread CoreTicker callback. A blocking wait such as `Future.Get()` inside a UFUNCTION is a self-deadlock — Backend C must only use an async kickoff (`RunDriverSequence` returns just a GUID handle immediately) plus a non-blocking poll (`PollDriverSequence`). long_press (holding the mouse button) spaces Down and Up apart with a `time.sleep` in the MCP server (`server.py`) process itself — no sleeping inside the engine.
+- **R6 (stuck-button/stuck-key watchdog)**: Where Down/Up are split into separate calls (`SimulatePointerDown/Up`, `InjectViewportKey`), a 15-second one-shot `FTSTicker` watchdog is also set on the C++ side in case a host (`server.py`) crash loses the matching Up. A generation counter is issued at Down time and registered in a map, and cancelled immediately when the normal Up arrives. If the watchdog fires later but the generation has already been replaced/removed, it is a no-op — this prevents wrongly releasing a reused button.
+- **R7 (Backend C handle cleanup)**: When `PollDriverSequence` sees completion (`bOutDone=true`), it removes that entry from the internal GUID→Future map immediately. Without this it accumulates without bound per session.
+- **R8 (Backend C reference count)**: `EnableAutomationDriver`/`DisableAutomationDriver` manage the reference count with a generation-based `TSet<uint64>` — so one session's Disable or safety timeout can't turn off an Enable registered by another session (the module is a process-global singleton, so conflicts are possible when multiple MCP sessions coexist). `EnableAutomationDriver` returns its own generation, and passing that value to `DisableAutomationDriver(Generation)` releases exactly that generation — when unspecified (0), it falls back to the legacy path that releases an arbitrary live generation.
 
-### 4.8 Editor↔Workspace Identity and Connection Selection (ADR)
+### ⚠️ AutomationDriver crash pitfall
 
-**Problem.** With multiple editors and/or Claude sessions on one host, the server attached to the first editor that answered multicast discovery (`nodes[0]`), so commands could reach the wrong project.
+`IAutomationDriverModule::CreateAsyncDriver()` internally calls `AutomatedApplication.ToSharedRef()`. `AutomatedApplication` is valid (non-null) only while `Enable()`d and is `Reset()` on `Disable()` — **calling `CreateAsyncDriver()`/`CreateDriver()` while disabled (or auto-disabled by the safety timeout) hard-crashes the editor immediately on the `IsValid()` assert in `TSharedPtr::ToSharedRef()`.**
 
-**Why not filter at discovery time.** The discovery pong's `data` payload is built by the engine's `PythonScriptRemoteExecution.cpp` and is opaque to the vendored client; it carries only a per-session UUID — no project name or `.uproject` path. Injecting a project marker would require modifying engine source (non-distributable, version-fragile) — rejected.
+To reproduce: call `EnableAutomationDriver(N seconds)`, wait until the safety timer auto-disables it after N seconds, then call `RunDriverSequence` (the normal delay between calls is enough for this to happen). So `RunDriverSequence` checks `IAutomationDriverModule::Get().IsEnabled()` at the start and returns an empty string (explicit failure) if it is disabled. Any new code touching Backend C must always keep this up-front check.
 
-**Decision.** Verify identity *after* connecting, using the stock Python API:
+### Creating an FKey in Python (Python binding gotcha)
 
-- For each discovered editor, open the command channel and eval `unreal.Paths.get_project_file_path()`; compare the `.uproject` filename stem (case-insensitive) to the server's `_PROJECT_STEM` (from `UE_PROJECT_ROOT`, else the nearest `*.uproject` from cwd, else *unresolved*). No C++ change; the probe is read-only.
-- **Strict refuse**: no matching editor → return an actionable error rather than attaching to a foreign one. `UE_BRIDGE_ALLOW_ANY=1` restores legacy first-node behavior. Pinning is `UE_PROJECT_ROOT`.
-- **Inconclusive ≠ mismatch**: a probe that can't read identity (editor mid-boot, Python not ready) is retryable, never converted into a refusal of the correct editor.
-- **Ambiguity**: two editors reporting the same stem → refuse (pin to disambiguate). Identity is compared by stem, not full path — junction/symlink layouts make `Path.resolve()` of the editor's path and the server-resolved path diverge, so full-path equality would yield false negatives. Same-stem-in-different-directories is an accepted limitation, surfaced as an ambiguity refusal rather than a silent wrong pick.
-- **Decision cache (matches only)**: keyed on the *settled* set of discovered editor ids (UUIDs are per session, so an unchanged set means the same editors are up). A matched editor still present skips re-probe; the heartbeat/tool path stays fast in steady state. A non-match is deliberately NOT cached — the discovered set can momentarily lag a slow editor's first pong, so a non-match is always re-probed rather than frozen into a stale refusal.
+Both `unreal.Key("LeftMouseButton")` and `unreal.Key(key_name="LeftMouseButton")` fail with `TypeError: call() takes at most 0 arguments`. The correct pattern:
 
-**Safety property.** Refusing cross-workspace connects prevents misrouted mutating commands — a meaningful guard given Remote Execution has no authentication (§5). The selection policy is a pure module (`matching.py`) with unit tests; the I/O probe is injected.
+```python
+key = unreal.Key()
+key.set_editor_property('key_name', 'LeftMouseButton')
+```
 
-**Discovery settle.** Multiple editors ARE discoverable concurrently on the shared loopback group — but only if the client waits for all pongs. Snapshotting on the first responder surfaces just one editor (non-deterministically, which looks like a "one editor at a time" limit but is a measurement artifact). A short settle (`_DISCOVERY_SETTLE`) after the first editor appears, before the set is read, fixes this: the settled set keys both the cache and the probe, so each session reliably matches its own editor among several (verified with two editors up — both discovered every round, each cwd matched its own project). So the shared multicast group suffices for concurrent multi-editor; per-project endpoints are not required for loopback.
+### PollDriverSequence return shape (Python binding gotcha)
 
----
+For a UFUNCTION with a bool return plus two `bool&` out-params, like `bool PollDriverSequence(FString const& Handle, bool& bOutDone, bool& bOutSuccess)`, measurement confirmed that in Python:
+- If the C++ return value is `true` (the handle exists) → a 2-tuple `(bOutDone, bOutSuccess)` (the C++ return bool itself is not included in the tuple)
+- If the return value is `false` (the handle doesn't exist / is already exhausted) → `None`
 
-## 5. Security and Operational Notes
+The caller must branch with `isinstance(poll, tuple)` (see `scripts/driver_sequence_poll.py`).
 
-- **Remote Execution has no authentication.** Any client in multicast range can connect and execute arbitrary Python. Set `RemoteExecutionMulticastTtl=0` to prevent packets from leaving the local machine.
-- **Workspace isolation**: in auto mode the server attaches only to the editor whose project matches its workspace and refuses otherwise (§4.8), so a session never sends commands to another project's editor. Pin with `UE_PROJECT_ROOT`; `UE_BRIDGE_ALLOW_ANY=1` disables the guard.
-- **Firewall**: Windows Defender will prompt to allow UDP 6766 and the editor's TCP listen port at least once. Allow only on the Private network profile.
-- **Do not share on shared machines**: leaving this configuration on a public machine or conference room PC exposes the editor to anyone on the same LAN segment. Always keep TTL=0.
-- **Editor restart resilience**: on TCP disconnect, the next call retries once + re-discovers. See §4.2 and the [MCP README §Connection Lifecycle](../README.md#connection-lifecycle) for details.
-- **PIE re-entry**: world references change immediately after PIE starts — any cached world handles in MCP tool state must be invalidated.
-- **Log pagination**: `tail_output_log` paginates the editor's Output Log file using a byte-offset cursor (max 256 KB per call, line cap `max_lines`). Long spans can be fetched incrementally using the returned `cursor` — the full log is never dumped into Claude's context.
+### Measured results
 
----
+- **Backend A/B × Click/RightClick/Drag/LongPress**: `handled=true` confirmed for every combination. Backend C is keyboard-only by design, so it is excluded from this matrix.
+- **Hit test with the editor window minimized**: with the editor window fully minimized, both Backend A and B clicks were confirmed to be processed normally with `handled=true`. `ProcessMouseButtonDownEvent`/`InputKey` are synthetic events that call the Slate/viewport APIs directly inside the process without going through the OS message pump, so they only perform a hit test based on the Slate widget tree and cached geometry, and don't consult OS-level focus, Z-order, or minimized state. Because OS `SendInput` is not used, clicks never leak into another process's window.
+- **AutomationDriver blocking real HW input**: `Enable()` really intercepts the physical mouse/keyboard, so this is a manual test that a human performs. Procedure:
+  1. Call `enable_automation_driver(auto_disable_seconds=15)`
+  2. For ~10 seconds right after Enable, try physical mouse clicks/keyboard input — there should be no response anywhere in PIE or the editor
+  3. After 15 seconds, check that physical input works normally again (confirming the safety-timeout auto-Disable)
 
-## 6. References
+### Backend A click reliability: the 3 preconditions for `SButton`
 
-- Unreal Python API (5.7): https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/?application_version=5.7
-- Scripting the Unreal Editor Using Python: https://dev.epicgames.com/documentation/en-us/unreal-engine/scripting-the-unreal-editor-using-python
-- Remote Control for Unreal Engine: https://dev.epicgames.com/documentation/en-us/unreal-engine/remote-control-for-unreal-engine
-- Reference client (in installed engine): `<UE>/Engine/Plugins/Experimental/PythonScriptPlugin/Content/Python/remote_execution.py`
+For non-touch (mouse) events, `SButton` (and derivatives such as CommonUI's `SCommonButton`) `OnMouseButtonUp` decides whether a click happened solely by `bEventOverButton = IsHovered()` — unlike touch events, there is no geometry fallback. So all 3 of the following must hold at the time of the Down injection for the click to actually fire. If any one is missing, `FSlateApplication::ProcessMouseButtonDownEvent`/`ProcessMouseButtonUpEvent` return `handled=true`, but the widget's `OnClicked` is never called.
+
+1. **Mouse capture**: a real `TSharedPtr<FGenericWindow>` must be passed to `ProcessMouseButtonDownEvent(platformWindow, event)` for `SButton::OnMouseButtonDown`'s `CaptureMouse` request to be established. If you pass `nullptr`, `HasMouseCapture()==false` at Up time.
+2. **Hover**: a `ProcessMouseMoveEvent` with a real position delta must come in just before Down for `IsHovered()==true` to hold. If only Down/Up are injected without a Move, there is no Hover even when capture is taken, and the click is ignored (identical Last/New positions are treated as a zero delta and ignored, so an offset that registers as real movement is needed).
+3. **App active state**: because of the `if (bHandleDeviceInputWhenApplicationNotActive || bAppIsActive || bIsVirtualInteraction)` gate in `FSlateApplication::ProcessReply`, mouse capture is never taken at all unless the editor is the OS foreground window.
+
+`InjectPointerButtonEvent` (`RemoteExecutionBridgeSlateInputLibrary.cpp`) handles all 3 internally on Down injection — it obtains the native window with the `ResolveNativeWindow*` helpers and passes it in, injects a Move just before Down, and calls `::SetForegroundWindow(hwnd)` via `ForceWindowForeground()`. **`ForceWindowForeground()` takes OS focus to the editor window on every Down** — if you were working in another window, this has the side effect of stealing its focus. An alternative that doesn't steal the foreground is to keep `FSlateApplication::SetHandleDeviceInputWhenApplicationNotActive(true)` (the engine's official exception to the gate above) turned on only while injecting; this has not yet been applied to this plugin.
+
+If you use the public Backend A functions such as `simulate_click`/`simulate_click_on_widget` as they are, the 3 conditions above are guaranteed automatically, so the caller doesn't need to handle them separately. However, **verify click success by an actual state change, not the return value (`handled`)** — `widget.is_pressed()`/`is_hovered()` transitions, or a before/after screen capture comparison. `handled=true` only means the event was routed; it is not evidence that `OnClicked` ran.
+
+Using virtual input alone, we chained clicks across screens — title → login → lobby → stage select → battle entry — and confirmed with screenshots that the actual battle screen was entered.

@@ -12,8 +12,8 @@ static FCriticalSection GCwdLock;
 static FString GCwd;
 static FCriticalSection GConnectedStartTimeLock;
 static FString GConnectedStartTime;
-static FCriticalSection GConnectedParentNameLock;
-static FString GConnectedParentName;
+static FCriticalSection GBranchNameLock;
+static FString GBranchName;
 
 void URemoteExecutionBridgeLibrary::Heartbeat()
 {
@@ -69,12 +69,6 @@ void URemoteExecutionBridgeLibrary::SetConnectedStartTime(const FString& StartTi
 	GConnectedStartTime = StartTime;
 }
 
-void URemoteExecutionBridgeLibrary::SetConnectedParentName(const FString& ParentName)
-{
-	FScopeLock Lock(&GConnectedParentNameLock);
-	GConnectedParentName = ParentName;
-}
-
 int32 URemoteExecutionBridgeLibrary::GetConnectedPid()
 {
 	return GPid.load(std::memory_order_relaxed);
@@ -97,31 +91,14 @@ FString URemoteExecutionBridgeLibrary::GetConnectedStartTime()
 	return GConnectedStartTime;
 }
 
-FString URemoteExecutionBridgeLibrary::GetConnectedParentName()
+void URemoteExecutionBridgeLibrary::SetConnectedBranchName(const FString& SessionName)
 {
-	FScopeLock Lock(&GConnectedParentNameLock);
-	return GConnectedParentName;
+	FScopeLock Lock(&GBranchNameLock);
+	GBranchName = SessionName;
 }
 
-void URemoteExecutionBridgeLibrary::ClearConnectedSession()
+FString URemoteExecutionBridgeLibrary::GetConnectedBranchName()
 {
-	{
-		FScopeLock Lock(&GNodeIdLock);
-		GConnectedNodeId.Empty();
-	}
-	GActiveSessions.store(0, std::memory_order_relaxed);
-	GPid.store(0, std::memory_order_relaxed);
-	GPpid.store(0, std::memory_order_relaxed);
-	{
-		FScopeLock Lock(&GCwdLock);
-		GCwd.Empty();
-	}
-	{
-		FScopeLock Lock(&GConnectedStartTimeLock);
-		GConnectedStartTime.Empty();
-	}
-	{
-		FScopeLock Lock(&GConnectedParentNameLock);
-		GConnectedParentName.Empty();
-	}
+	FScopeLock Lock(&GBranchNameLock);
+	return GBranchName;
 }

@@ -4,6 +4,10 @@
 #include "Widgets/SCompoundWidget.h"
 #include "RemoteExecutionStatusMonitor.h"
 
+/**
+ * Draws the MCP server connection state as a single dot - green while the heartbeat is fresh, red when it drops.
+ * Info about the connected MCP process/session is in the tooltip.
+ */
 class SRemoteExecutionStatusBadge : public SCompoundWidget
 {
 public:
@@ -17,11 +21,10 @@ public:
 	virtual ~SRemoteExecutionStatusBadge() override;
 
 private:
-	void OnStatusChanged(ERemoteExecutionStatus NewStatus);
+	void OnStatusChanged();
 
-	FSlateColor GetStatusColor() const;
-	FText GetTooltipText() const;
+	[[nodiscard]] FSlateColor GetStatusColor() const;
+	[[nodiscard]] FText GetTooltipText() const;
 
 	TSharedPtr<FRemoteExecutionStatusMonitor> Monitor;
-	ERemoteExecutionStatus CurrentStatus;
 };

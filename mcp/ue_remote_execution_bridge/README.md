@@ -1,145 +1,137 @@
-# UE Remote Execution Bridge — MCP Server
+# ue-remote-execution-bridge MCP Server — Operations Manual
 
-Exposes Unreal Editor 5.7's Python interpreter as MCP tools, enabling Claude to execute arbitrary Python inside the editor, control PIE, and stream the Output Log. When the stock `unreal.*` Python API is missing a symbol, extend it by adding a `UFUNCTION` to the companion C++ plugin shipped in this repo — see [§C++ Plugin Extension](#c-plugin-extension-python-api-escape-hatch) below. This escape hatch is a core part of the design, not a workaround.
+An MCP server that runs arbitrary Python inside the UE editor from Claude Code via UE's built-in Remote Execution. For installation, see the [repository root README](../../README.md).
 
-Architecture and design decisions: [docs/DESIGN.md](./docs/DESIGN.md)
+> 🧬 **It grows the more you use it.** The `run_python` call history accumulates in [`docs/CHEATSHEET.md`](./docs/CHEATSHEET.md), and recurring patterns are promoted to `scripts/`.
+>
+> 🛠️ **Work around Python API limits with the C++ plugin.** When you need a member that `unreal.*` doesn't expose, add a `UFUNCTION` to `Plugins/RemoteExecutionBridge/` (procedure and catalog: [`docs/DESIGN.md §6–7`](./docs/DESIGN.md)).
 
-> This document is the MCP server subproject's **operations & extension manual**. For a public overview, install steps, the tool list, and security warnings, see the [root README](../../README.md).
+- Design, protocol, ADR: [`docs/DESIGN.md`](./docs/DESIGN.md)
+- API frequency table and snippets: [`docs/CHEATSHEET.md`](./docs/CHEATSHEET.md)
+
+---
 
 ## Files
 
-| File | Role |
+| Path | Role |
 |---|---|
-| `server.py` | FastMCP server — tool definitions, connection lifecycle management |
-| `execute.py` | Epic's `remote_execution.py` (UDP discovery + TCP command client), renamed to avoid import-path collision |
-| `update_cheatsheet.py` | Folds `usage.log` API frequency deltas into `docs/CHEATSHEET.md` |
-| `docs/DESIGN.md` | Protocol, architecture, ADR |
-| `docs/CHEATSHEET.md` | Frequently-used UE Python API reference (manually curated from `usage.log`) |
-| `README.md` | This file |
+| `src/server.py` | MCP server — tool definitions, connection lifecycle, heartbeat |
+| `src/execute.py` | Verbatim copy of Epic's `remote_execution.py` (UDP discovery + TCP command client) |
+| `scripts/*.py` | Scripts that dedicated tools run inside the editor (list them with `list_scripts`) |
+| `docs/DESIGN.md` | Protocol, architecture, ADR, UFUNCTION catalog |
+| `docs/CHEATSHEET.md` | API frequency table and common snippets (updated by `update_cheatsheet`) |
+| `src/usage.log`, `src/.sessions/` | Files created at runtime (git-ignored) |
 
-## Prerequisites
+---
 
-Setup is covered in the [root README §Install](../../README.md#install). Operational requirements:
+## Environment variables
 
-- Editor must be **running** (commandlet/headless mode is not supported)
-- Multicast `239.0.0.1:6766` reachable on local loopback
-- Firewall: allow UDP 6766 and the editor's TCP listen port (Private profile)
-- Python 3.10+ with `mcp` (FastMCP)
+| Variable | Default | Description |
+|------|--------|------|
+| `UE_PROJECT_ROOT` | auto-detected | The folder with the `*.uproject`, relative to `.mcp.json` (e.g. `.`, `Client`). **With multiple editors, command routing is scoped to the editor whose project_root matches this** (workspace isolation). If unset, it searches upward from the `.mcp.json` location for a `*.uproject` |
+| `UE_NODE_ID` | — | Default node_id to connect to when multiple editors are running (takes precedence over the project_root filter) |
 
-## MCP Registration
+After editing `.mcp.json`, restart Claude Code or reload with `/mcp`.
 
-Base setup (`.mcp.json` template) is in the [root README §Install Step 5](../../README.md#install). Operational notes:
+---
 
-- `args` path is relative to where Claude Code launches — typically the UE project root.
-- Set `UE_PROJECT_ROOT` (absolute path) to override project inference when the MCP workspace is not the UE project root.
-- After editing `.mcp.json`, restart Claude Code or run `/mcp`.
-- The server starts even if the editor is off — it retries discovery on the first tool call. First successful connect logs `[MCP] ue_remote_execution_bridge server connected` to the UE Output Log.
+## Connection behavior
 
-## C++ Plugin Extension (Python API Escape Hatch)
+Every tool call does UDP multicast (`239.0.0.1:6766`) discovery → reverse TCP handshake → execute → close (fresh per call).
 
-The four MCP tools (see [root README §MCP Tools](../../README.md#mcp-tools)) don't add editor-internal capabilities to Python. When `unreal.*` is missing a symbol — `AttributeError`, absent from [the 5.7 Python API docs](https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/?application_version=5.7), needs engine-internal `private:` members (`FBlueprintEditorUtils`, `FAssetToolsModule`, …), or two Python workaround attempts failed — add a `UFUNCTION` to `Plugins/RemoteExecutionBridge/`. This is the plugin's primary role.
+Multiple sessions are serialized with the Win32 named mutex `Local\UE_RemoteExecution_Bridge` (waits up to 15 seconds). A heartbeat thread pushes `pid`, `cwd`, `git_branch`, `active_sessions`, etc. to the UE toolbar badge tooltip every 2 seconds. On the first successful connection, `[MCP] ue-remote-execution-bridge server connected` is printed to the editor Output Log.
 
-### Existing UFUNCTION catalog
+Internal details (session lock, full list of metadata): `docs/DESIGN.md`.
 
-> SoT — this table is referenced from `docs/DESIGN.md §4.7`. Edit here when UFUNCTIONs are added or changed.
+---
 
-Check here before adding a new UFUNCTION.
+## Tools
 
-| Module | Class | Python call | Purpose |
-|---|---|---|---|
-| `RemoteExecutionBridge` | `URemoteExecutionBridgeLibrary` | `unreal.RemoteExecutionBridgeLibrary.heartbeat()` | MCP session alive signal |
-| `RemoteExecutionBridge` | `URemoteExecutionBridgeLibrary` | `unreal.RemoteExecutionBridgeLibrary.set_connected_{node_id,pid,ppid,parent_name,cwd,start_time}(…)`, `set_active_sessions(n)` | MCP session metadata (used by the toolbar badge) |
-| `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.get_blueprint_graphs(bp) -> [UEdGraph]` | Return all graphs (EventGraph, function, macro, etc.) in a Blueprint |
-| `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.get_graph_nodes(graph) -> [UEdGraphNode]` | Return all nodes in a graph |
-| `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.find_nodes_by_function_name(bp, function_name) -> [UEdGraphNode]` | Return all `K2Node_CallFunction` nodes across all Blueprint graphs matching `function_name` |
-| `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.delete_blueprint_node(bp, node)` | Unlink all pins and remove the node from the graph |
-| `RemoteExecutionBridgeEditor` | `UBlueprintEditorUtilityLibrary` | `unreal.BlueprintEditorUtilityLibrary.mark_blueprint_modified(bp)` | Set Blueprint dirty flag (marks it as needing recompile) |
-| `RemoteExecutionBridgeEditor` | `UMaterialEditorUtilityLibrary` | `unreal.MaterialEditorUtilityLibrary.get_material_expressions(material) -> [UMaterialExpression]` | Return all expression nodes in a Material |
+| Category | Tool | Purpose |
+|---------|------|-----|
+| Execution | `run_python` | Run arbitrary Python (`exec_file`/`exec_statement`/`eval_statement`) |
+| Multi-node | `list_ue_nodes` / `select_ue_node` / `clear_ue_node` | Choose an editor instance |
+| Virtual PIE input | `simulate_pointer_input` / `simulate_key_input` | Inject mouse click / drag / long press and key input into PIE (Slate / GameViewportClient backends) |
+| Virtual PIE input | `enable_automation_driver` / `run_driver_sequence` / `disable_automation_driver` | AutomationDriver keyboard sequences (real input is blocked while enabled) |
+| BP refactoring | `replace_custom_event_with_bie` | Replace a WBP Custom Event with a same-named BlueprintImplementableEvent override on the parent C++ class (migrates the wiring, rolls back on failure) |
+| BP refactoring | `find_external_event_callers` | Detect call sites in external assets that the replacement above would break (read-only) |
+| Maintenance | `update_cheatsheet` | Merge the `src/usage.log` delta into `docs/CHEATSHEET.md`, then truncate |
+| Self-check | `list_scripts` | List registered scripts |
 
-### Adding a new UFUNCTION — 5 steps
+For PIE start/stop, Output Log queries, asset search/save/move, and DataTable queries, use the official unreal-mcp toolsets. PIE pause, which the official toolsets lack, is done by sending the console `pause` command through `run_python`.
 
-1. **Choose module**: runtime UE APIs → `RemoteExecutionBridge`; editor-only engine APIs (`FBlueprintEditorUtils`, `FAssetToolsModule`, `UEditorEngine`, etc.) → `RemoteExecutionBridgeEditor`
-2. **Edit header and source**: add `UFUNCTION(BlueprintCallable, Category="RemoteExecutionBridge")` to `Source/<Module>/Public/*.h` and `Private/*.cpp`. Follow Epic's [UE C++ Coding Standard](https://dev.epicgames.com/documentation/en-us/unreal-engine/epic-cplusplus-coding-standard-for-unreal-engine).
-3. **Add Build.cs dependencies**: for editor-module APIs — `FBlueprintEditorUtils` → `Kismet`; `UEditorEngine`/`GEditor` → `UnrealEd`; `FAssetToolsModule` → `AssetTools`; `FNotificationInfo` → `Slate` + `SlateCore`
-4. **Build**: Live Coding (`Ctrl+Alt+F11`) for body-only edits, or rebuild `<YourProject>.sln` and relaunch the editor for new `UCLASS`/`UFUNCTION` declarations. Note: Live Coding only supports modifying existing function bodies reliably — new declarations require a full rebuild.
-5. **Verify and document**: confirm `unreal.ClassName.method_name(...)` works, then ① add a row to the catalog table above, ② add a usage snippet to `docs/CHEATSHEET.md`
+For each tool's arguments and return values, see the MCP tool docstring (look it up with `/mcp`).
 
-For graph-mutating UFUNCTIONs (`RemoveNode`, pin-link edits, etc.), wrap the mutation in `FScopedTransaction` so Ctrl+Z works. Verify integrity after: `unreal.EditorAssetLibrary.save_asset(<path>)`, close + reopen the Blueprint, confirm the graph.
+---
 
-## Workspace-Aware Editor Matching
+## Quick start
 
-The server attaches only to the UE editor whose *project* matches its workspace, and
-**refuses** otherwise — so commands never reach the wrong project when several editors or
-Claude sessions run at once.
+```python
+# Run arbitrary Python
+run_python("""
+import unreal
+print(unreal.SystemLibrary.get_engine_version())
+""")
 
-How it works (auto mode):
+# Evaluate a single expression (returns a value)
+run_python("unreal.SystemLibrary.get_project_directory()", mode="eval_statement")
+```
 
-1. `_PROJECT_STEM` is resolved once at startup: `UE_PROJECT_ROOT` if set, else the nearest
-   `*.uproject` walking from the MCP process cwd (the directory itself, then its parents).
-   If none is found the workspace is **unresolved** and every auto-connect is refused — a
-   coincidental cwd name must not pose as a project.
-2. UE's discovery pong carries no project identity (only a per-session UUID), so the server
-   verifies *after* connecting: for each discovered editor it opens the command channel and
-   evaluates `unreal.Paths.get_project_file_path()`, comparing the `.uproject` filename stem
-   (case-insensitive) to `_PROJECT_STEM`. The probe is read-only; a non-matching editor is
-   left untouched (no heartbeat, no green badge).
-3. Outcomes: **match** → connect; **no match** → refuse with an actionable error; **two
-   editors report the same project** → refuse as ambiguous (pin with `UE_PROJECT_ROOT`);
-   **identity not readable yet** (editor mid-boot) → retry, never a false refuse.
-4. The decision is cached on the *set* of discovered editor ids — steady-state heartbeats and
-   tool calls don't re-probe until an editor appears or disappears.
+If the same code keeps recurring, promote it to `scripts/` and register it as a dedicated MCP tool.
 
-**Pinning.** Set `UE_PROJECT_ROOT` (absolute path) to fix the target project explicitly; the
-same matching is enforced against the pinned stem.
+---
 
-**Escape hatch.** `UE_BRIDGE_ALLOW_ANY=1` restores the legacy "attach to the first discovered
-editor" behavior (default off). Use only when you knowingly want any editor.
+## Multi-editor connection targets
 
-This is project matching, not arbitrary editor selection — the server does not parse prompts
-like "connect to PID 2968" (PID is not in the pong). To target another project, launch the
-MCP server from that workspace or set `UE_PROJECT_ROOT`.
+Even when editors from several workspaces are running at the same time, commands are **automatically scoped to the editor matching `UE_PROJECT_ROOT`**, so they don't leak into the wrong workspace. If there is no matching editor, or there are two or more candidates with no discriminator (filter match or pin), it does not guess `remote_nodes[0]`; it **fails and lists the candidates** (preventing silent misrouting).
 
-**Verifying the match.** `run_python("unreal.Paths.get_project_file_path()", mode="eval_statement")`
-returns the connected editor's `.uproject` — its stem must equal your workspace's.
+To deliberately target an editor from another workspace, pin it in natural language:
 
-> Multiple editors are discoverable concurrently on the shared loopback group as long as the
-> server waits for all pongs (a short settle after the first responder). Each session then
-> matches its own editor among several. If your workspace's editor isn't among those
-> discovered, the server refuses rather than connecting to another project's editor.
+- `"list the running editors"` → `list_ue_nodes()` (check the current routing basis with `selection_source`)
+- `"connect to the X editor"` → `select_ue_node(node_id)` (bypasses the project_root filter and guard. The ID is stored even if the editor isn't visible right now — deferred binding)
+- `"unpin the connection"` → `clear_ue_node()` (returns to env/workspace-filter auto-selection)
 
-## Connection Lifecycle
+Each Claude Code session's MCP server starts independently, so two sessions can target different editors at the same time. Check which session is attached where from the Branch, PID, and Project in the toolbar badge tooltip.
 
-- **Eager connect**: 2-second discovery on server startup. Connects immediately if a *matching* editor is running; skips silently otherwise (including when only non-workspace editors are up — see Workspace-Aware Editor Matching).
-- **Per-call connect**: Each tool call opens a fresh UDP discovery + TCP handshake (~100–200 ms overhead) and closes the connection when the call completes. Connection reuse is deferred to a later revision.
-- A single `[MCP] ue_remote_execution_bridge server connected` line is written to the editor Output Log on the first successful heartbeat (not repeated per tool call, to avoid spam).
-- If the editor is not reachable, the call returns an error immediately.
-- The toolbar badge turns red when heartbeats time out. On disconnect, stored MCP session metadata is cleared; the tooltip shows `0` sessions and `—` for stale MCP fields.
-
-## Troubleshooting
-
-**`No Unreal Editor discovered within 5s`**
-- Is the editor running?
-- Is `bRemoteExecution=True`? Check Project Settings → Plugins → Python.
-- Can `127.0.0.1` reach the multicast group? VPNs, containers, and strict firewalls may block it.
-- Is another process holding UDP 6766? (Another UE editor instance, or an orphaned server process.)
-
-**`Remote party failed to send a valid response!`**
-- Returned payload too large. Increase `RemoteExecutionSendBufferSizeBytes` and `RemoteExecutionReceiveBufferSizeBytes` to 2 MiB or more.
-
-**`tail_output_log` returns empty results**
-- Log file may not be flushed yet. Run any Python from inside the editor, then retry.
+---
 
 ## Usage Logging
 
-Every `run_python` call appends raw code to `usage.log` (`---\n<ISO timestamp>\n<code>\n`); `start_pie`/`stop_pie`/`tail_output_log` skip logging.
+Code from `run_python` calls is appended in plaintext to `src/usage.log` (do not include secrets). The MCP tool `update_cheatsheet` extracts `unreal.X.Y` symbols, merges them into the `docs/CHEATSHEET.md` frequency table, and truncates the log. Details: `docs/CHEATSHEET.md`.
 
-```powershell
-# preview
-python mcp\ue_remote_execution_bridge\update_cheatsheet.py --dry-run
-# apply + clear delta
-python mcp\ue_remote_execution_bridge\update_cheatsheet.py --truncate-usage
-```
+---
 
-Merge semantics and snippet curation policy: [`docs/CHEATSHEET.md`](./docs/CHEATSHEET.md).
+## C++ plugin extension (escape hatch)
 
-Security: raw code is stored plaintext until aggregated. Do not pass credentials or secrets through `run_python`.
+In the following situations, add a `UFUNCTION(BlueprintCallable)` to `Plugins/RemoteExecutionBridge/` instead of working around it in Python:
+
+- `AttributeError: module 'unreal' has no attribute …`
+- You need an engine-internal `private:` member such as `FBlueprintEditorUtils` or `FAssetToolsModule`
+- Two Python workarounds for the same goal have failed
+
+For the procedure, UFUNCTION catalog, and module classification, see [`docs/DESIGN.md §6–7`](./docs/DESIGN.md).
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|------|------|------|
+| `No UE editor found via UDP discovery` | Editor not running, or PythonScriptPlugin disabled | Launch the editor and check that the plugin is enabled |
+| `editor(s) found but none match this workspace` | The editor for this workspace (`UE_PROJECT_ROOT`) isn't running | Launch that workspace's editor, or pin with `select_ue_node()` if that is intended |
+| `editors discovered ... refusing to guess` | Multiple candidates, but `UE_PROJECT_ROOT` is unset and nothing is pinned | Set `UE_PROJECT_ROOT` in `.mcp.json` or use `select_ue_node()` |
+| `Workspace guard failed` | The connected editor's actual project doesn't match what's expected (stale discovery) | Check the target editor and retry, or pin with `select_ue_node()` |
+| `Target node … not found` | The editor pinned with `select_ue_node` has shut down | `clear_ue_node()` or restart the target editor |
+| `Mutex timeout (15s)` | Another Claude Code session is connected to UE | Wait a moment and retry |
+| `Remote party failed to send a valid response!` | Payload exceeded the buffer | Add `Send/ReceiveBufferSizeBytes=2097152` to `DefaultEngine.ini` |
+| `OSError: Address already in use` | Port conflict | Restart the editor |
+| Toolbar dot stays red | The MCP server didn't start or can't find the editor | Check server status in `/mcp` → check that the editor shows up with `list_ue_nodes()` |
+| No connection after a firewall warning | UDP 6766 / editor TCP port blocked | Allow on the Private profile |
+
+---
+
+## Related docs
+
+- [`docs/DESIGN.md`](./docs/DESIGN.md) — protocol, architecture, ADR, UFUNCTION catalog
+- [`docs/CHEATSHEET.md`](./docs/CHEATSHEET.md) — API frequency table and common snippets
+- [UE Python API](https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/)

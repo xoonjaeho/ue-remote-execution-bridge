@@ -11,6 +11,16 @@ public class RemoteExecutionBridge : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
+			"InputCore",
+			"Slate",
+			"SlateCore",
+			"UMG",
+		});
+
+		PrivateDependencyModuleNames.AddRange(new string[]
+		{
+			"AutomationDriver",
+			"Json",
 		});
 	}
 }
