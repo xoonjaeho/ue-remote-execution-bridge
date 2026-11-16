@@ -5,7 +5,7 @@
 #include "RemoteExecutionBridgeAutomationDriverLibrary.generated.h"
 
 // Input injection for automated PIE interaction verification - Backend C (AutomationDriver). Async kickoff+poll only, keyboard sequences only
-// (M1 spike finding: the MoveByOffset cursor coordinate system is completely separate from SetMouse, so coordinate-based mouse is out of scope - use Backend B if needed).
+// (Finding: the MoveByOffset cursor coordinate system is completely separate from SetMouse, so coordinate-based mouse is out of scope - use Backend B if needed).
 UCLASS()
 class REMOTEEXECUTIONBRIDGE_API URemoteExecutionBridgeAutomationDriverLibrary final : public UBlueprintFunctionLibrary
 {

@@ -28,7 +28,7 @@ An MCP server that runs arbitrary Python inside the UE editor from Claude Code v
 
 | Variable | Default | Description |
 |------|--------|------|
-| `UE_PROJECT_ROOT` | auto-detected | The folder with the `*.uproject`, relative to `.mcp.json` (e.g. `.`, `Client`). **With multiple editors, command routing is scoped to the editor whose project_root matches this** (workspace isolation). If unset, it searches upward from the `.mcp.json` location for a `*.uproject` |
+| `UE_PROJECT_ROOT` | unset (no workspace filter) | The folder with the `*.uproject`, relative to `.mcp.json` (e.g. `.`, `Client`). **With multiple editors, command routing is scoped to the editor whose project_root matches this** (workspace isolation). If unset there is no workspace filter: calls route to the single visible editor, and the server refuses to guess when several editors are visible (set this variable or use `select_ue_node()`) |
 | `UE_NODE_ID` | — | Default node_id to connect to when multiple editors are running (takes precedence over the project_root filter) |
 
 After editing `.mcp.json`, restart Claude Code or reload with `/mcp`.
@@ -53,8 +53,6 @@ Internal details (session lock, full list of metadata): `docs/DESIGN.md`.
 | Multi-node | `list_ue_nodes` / `select_ue_node` / `clear_ue_node` | Choose an editor instance |
 | Virtual PIE input | `simulate_pointer_input` / `simulate_key_input` | Inject mouse click / drag / long press and key input into PIE (Slate / GameViewportClient backends) |
 | Virtual PIE input | `enable_automation_driver` / `run_driver_sequence` / `disable_automation_driver` | AutomationDriver keyboard sequences (real input is blocked while enabled) |
-| BP refactoring | `replace_custom_event_with_bie` | Replace a WBP Custom Event with a same-named BlueprintImplementableEvent override on the parent C++ class (migrates the wiring, rolls back on failure) |
-| BP refactoring | `find_external_event_callers` | Detect call sites in external assets that the replacement above would break (read-only) |
 | Maintenance | `update_cheatsheet` | Merge the `src/usage.log` delta into `docs/CHEATSHEET.md`, then truncate |
 | Self-check | `list_scripts` | List registered scripts |
 
@@ -117,12 +115,13 @@ For the procedure, UFUNCTION catalog, and module classification, see [`docs/DESI
 
 | Symptom | Cause | Fix |
 |------|------|------|
-| `No UE editor found via UDP discovery` | Editor not running, or PythonScriptPlugin disabled | Launch the editor and check that the plugin is enabled |
+| `No Unreal Editor discovered within …s` | Editor not running, or PythonScriptPlugin disabled | Launch the editor and check that the plugin is enabled |
 | `editor(s) found but none match this workspace` | The editor for this workspace (`UE_PROJECT_ROOT`) isn't running | Launch that workspace's editor, or pin with `select_ue_node()` if that is intended |
-| `editors discovered ... refusing to guess` | Multiple candidates, but `UE_PROJECT_ROOT` is unset and nothing is pinned | Set `UE_PROJECT_ROOT` in `.mcp.json` or use `select_ue_node()` |
+| `editors discovered with no UE_PROJECT_ROOT filter or node pin — refusing to guess` | Multiple candidates, but `UE_PROJECT_ROOT` is unset and nothing is pinned | Set `UE_PROJECT_ROOT` in `.mcp.json` or use `select_ue_node()` |
 | `Workspace guard failed` | The connected editor's actual project doesn't match what's expected (stale discovery) | Check the target editor and retry, or pin with `select_ue_node()` |
-| `Target node … not found` | The editor pinned with `select_ue_node` has shut down | `clear_ue_node()` or restart the target editor |
-| `Mutex timeout (15s)` | Another Claude Code session is connected to UE | Wait a moment and retry |
+| `Target node '…' not found within …s` | The editor pinned with `select_ue_node` has shut down (a pin is re-pinned automatically after a restart only when it pointed at this workspace's editor) | `clear_ue_node()`, `select_ue_node()` again, or restart the target editor |
+| `No matching Unreal Editor for this workspace within …s` | No editor in this workspace answered discovery | Launch this workspace's editor, or pin one with `select_ue_node()` |
+| `UE connection held by another session. Retry shortly.` | Another Claude Code session held the UE connection for longer than 15 seconds | Wait a moment and retry |
 | `Remote party failed to send a valid response!` | Payload exceeded the buffer | Add `Send/ReceiveBufferSizeBytes=2097152` to `DefaultEngine.ini` |
 | `OSError: Address already in use` | Port conflict | Restart the editor |
 | Toolbar dot stays red | The MCP server didn't start or can't find the editor | Check server status in `/mcp` → check that the editor shows up with `list_ue_nodes()` |

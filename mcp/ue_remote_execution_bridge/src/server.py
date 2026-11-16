@@ -2,7 +2,7 @@
 
 Bridge architecture: cross-process mutex, per-call fresh connection,
 background heartbeat, session tracking. Base tool run_python extended with
-gated automation-input tools and Blueprint refactoring tools. PIE
+gated automation-input tools. PIE
 start/stop, output-log tailing, and asset/DataTable operations are left to
 Epic's official unreal-mcp toolsets (UE 5.8+) — see README.md.
 """
@@ -178,6 +178,8 @@ _usage_lock = threading.Lock()
 # Node selection state — priority: session > env UE_NODE_ID > fallback (remote_nodes[0])
 _ENV_DEFAULT_NODE_ID: str | None = os.environ.get("UE_NODE_ID")
 _SELECTED_NODE_ID: str | None = None
+# Normalized project_root the pinned node advertised at select_ue_node time (None if it was not visible then).
+_SELECTED_NODE_ROOT: str | None = None
 _SELECTED_NODE_LOCK = threading.Lock()
 
 
@@ -224,7 +226,9 @@ def _discover_node(
 	strict: bool,
 	project_root_filter: str | None,
 ) -> str | None:
-	# Discovery (UDP) does not use the UE command socket - keeping it separate from connection (_connect_node) lets discovery run without the mutex
+	# Discovery (UDP) does not use the UE command socket, so it is kept separate from connection (_connect_node).
+	# Both callers (_try_heartbeat, _ue_connection) still hold the mutex around discovery + connect so the pair is atomic;
+	# only list_ue_nodes / select_ue_node run their own UDP discovery without it.
 	remote.start()
 	deadline = time.monotonic() + timeout
 	if preferred_node_id is None:
@@ -426,7 +430,7 @@ def _set_connected_code(node_id: str) -> str:
 		"import unreal\n"
 		"try:\n"
 		f"    unreal.RemoteExecutionBridgeLibrary.set_connected_node_id({json.dumps(node_id)})\n"
-		+ _session_lines()
+		+ (_session_lines() if _count_active_sessions() == 1 else "")
 		+ "except AttributeError:\n"
 		"    pass\n"
 	)
@@ -445,17 +449,21 @@ def _ue_connection() -> Generator[RemoteExecution, None, None]:
 	try:
 		preferred = _resolve_target_node_id()
 		# No explicit pin → constrain discovery to this workspace's editor (project_root match).
-		# With a pin and a filter, use non-strict - the pin lookup must be able to return None so the re-pin fallback below runs
+		# A vanished pin may be re-pinned (editor restart issues a new node_id) only if the pinned editor
+		# was advertising this workspace's project_root; a deliberate cross-workspace pin stays strict.
+		with _SELECTED_NODE_LOCK:
+			pin_root = _SELECTED_NODE_ROOT if _SELECTED_NODE_ID is not None else None
+		can_repin = preferred is not None and _PROJECT_ROOT_FILTER is not None and pin_root == _PROJECT_ROOT_FILTER
+		# When re-pinning is allowed use non-strict - the pin lookup must be able to return None so the fallback below runs
 		result = _open_remote(
 			_DISCOVERY_TIMEOUT,
 			preferred_node_id=preferred,
-			strict=not (preferred is not None and _PROJECT_ROOT_FILTER),
+			strict=not can_repin,
 			project_root_filter=None if preferred else _PROJECT_ROOT_FILTER,
 		)
-		if result is None and preferred is not None and _PROJECT_ROOT_FILTER:
-			# The pinned node is gone - restarting the editor issues a new node_id.
-			# Look again among this workspace's editors only (keep the filter so we do not leak into another workspace),
-			# and update the pin to the new id. Without this, every call after a restart keeps looking for the dead pin and fails.
+		if result is None and can_repin:
+			# The pinned node is gone. Look again among this workspace's editors only
+			# (keep the filter so we do not leak into another workspace) and update the pin to the new id.
 			result = _open_remote(
 				_DISCOVERY_TIMEOUT,
 				preferred_node_id=None,
@@ -466,9 +474,9 @@ def _ue_connection() -> Generator[RemoteExecution, None, None]:
 				with _SELECTED_NODE_LOCK:
 					if _SELECTED_NODE_ID is not None:
 						_SELECTED_NODE_ID = result[1]
+				logging.warning("Pinned node %s vanished (editor restart?) — re-pinned to %s", preferred, result[1])
 				# Treat the pin state as cleared so _assert_workspace below still runs.
 				preferred = None
-				logging.info("Pinned node vanished (editor restart?) — re-pinned to %s", result[1])
 		if result is None:
 			raise RuntimeError(
 				f"No matching Unreal Editor for this workspace within {_DISCOVERY_TIMEOUT}s. "
@@ -543,16 +551,20 @@ def _log_usage(code: str) -> None:
 
 
 _API_RE = re.compile(r"unreal\.([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)")
-_ENTRY_SEP_RE = re.compile(r"^---\s*$", re.MULTILINE)
+# An entry starts with a `---` line immediately followed by an ISO timestamp line, so a `---` line inside logged code does not split entries.
+_ENTRY_SEP_RE = re.compile(r"^---[ \t]*\n(?=\d{4}-\d{2}-\d{2}T\d)", re.MULTILINE)
 _ISO_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T")
+_ISO_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _PERIOD_LINE_RE = re.compile(r"^(\S+(?:[ \t]+\S+)*): (\S+) ~ \S+ \((\d+) entries\)$", re.MULTILINE)
 
 
-def _parse_usage_log(text: str) -> tuple[int, dict[str, dict[str, Any]]]:
-	"""Parse usage.log text → (total_entries, {api: {'count': int, 'last_seen': 'YYYY-MM-DD'}})."""
+def _parse_usage_log(text: str) -> tuple[int, dict[str, dict[str, Any]], str]:
+	"""Parse usage.log text → (total_entries, {api: {'count': int, 'last_seen': 'YYYY-MM-DD'}}, min_date)."""
 	counts: dict[str, int] = {}
 	last_seen: dict[str, str] = {}
 	total = 0
+	min_date = ""
+	text = text.replace("\r\n", "\n")
 	for entry in _ENTRY_SEP_RE.split(text):
 		entry = entry.strip()
 		if not entry:
@@ -563,6 +575,8 @@ def _parse_usage_log(text: str) -> tuple[int, dict[str, dict[str, Any]]]:
 			continue
 		date = date_match.group(1)
 		total += 1
+		if not min_date or date < min_date:
+			min_date = date
 		seen: set[str] = set()
 		for m in _API_RE.finditer(body):
 			seen.add("unreal." + m.group(1))
@@ -571,7 +585,7 @@ def _parse_usage_log(text: str) -> tuple[int, dict[str, dict[str, Any]]]:
 			if api not in last_seen or last_seen[api] < date:
 				last_seen[api] = date
 	delta = {api: {"count": c, "last_seen": last_seen[api]} for api, c in counts.items()}
-	return total, delta
+	return total, delta, min_date
 
 
 def _parse_cheatsheet_table(text: str) -> tuple[list[str], list[str], list[dict[str, Any]], list[str]]:
@@ -628,11 +642,14 @@ def _update_cheatsheet(dry_run: bool = False) -> dict[str, Any]:
 		return {"status": "no-op", "message": "usage.log does not exist."}
 	with _usage_lock:
 		log_text = USAGE_LOG_PATH.read_text(encoding="utf-8")
-	total, delta = _parse_usage_log(log_text)
+	total, delta, min_log_date = _parse_usage_log(log_text)
 	if total == 0:
 		return {"status": "no-op", "message": "usage.log is empty.", "entries_processed": 0}
 
-	cheat_text = CHEATSHEET_PATH.read_text(encoding="utf-8")
+	# read_bytes (not read_text) so the file's EOL style can be detected and restored on write.
+	cheat_raw = CHEATSHEET_PATH.read_bytes().decode("utf-8")
+	eol = "\r\n" if "\r\n" in cheat_raw else "\n"
+	cheat_text = cheat_raw.replace("\r\n", "\n")
 	pre, header_lines, rows, post = _parse_cheatsheet_table(cheat_text)
 	existing = {r["api_key"]: r for r in rows}
 
@@ -664,13 +681,16 @@ def _update_cheatsheet(dry_run: bool = False) -> dict[str, Any]:
 		m = _PERIOD_LINE_RE.search(l)
 		if m:
 			label, min_date, prev_total_str = m.group(1), m.group(2), m.group(3)
+			# Initial state: the line holds a "-" placeholder instead of dates.
+			if not _ISO_DAY_RE.match(min_date):
+				min_date = min_log_date
 			new_total = int(prev_total_str) + total
 			pre[i] = _PERIOD_LINE_RE.sub(
 				f"{label}: {min_date} ~ {max_date} ({new_total} entries)", l
 			)
 			break
 
-	new_text = "\n".join(pre + _format_table(header_lines, rows) + post)
+	new_text = "\n".join(pre + _format_table(header_lines, rows) + post).replace("\n", eol)
 
 	result: dict[str, Any] = {
 		"status": "ok",
@@ -686,7 +706,7 @@ def _update_cheatsheet(dry_run: bool = False) -> dict[str, Any]:
 		result["status"] = "dry-run"
 		return result
 
-	CHEATSHEET_PATH.write_text(new_text, encoding="utf-8", newline="\n")
+	CHEATSHEET_PATH.write_bytes(new_text.encode("utf-8"))
 	with _usage_lock:
 		USAGE_LOG_PATH.write_text("", encoding="utf-8")
 	return result
@@ -801,18 +821,6 @@ def list_scripts() -> str:
 
 def _b64(payload: Any) -> str:
 	return base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
-
-
-def _validate_ue_path(path: str, label: str) -> None:
-	"""Reject paths that would break script substitution or escape /Game.
-
-	Substitution is naive str.replace into a single-quoted Python literal, so
-	quotes/newlines/backslashes in the path can corrupt the generated script.
-	Also enforce leading '/' to avoid accidental short-name lookups."""
-	if not path or not path.startswith("/"):
-		raise ValueError(f"{label} must start with '/', got: {path!r}")
-	if any(c in path for c in ("'", '"', "\n", "\r", "\\")):
-		raise ValueError(f"{label} contains unsafe characters: {path!r}")
 
 
 def _validate_token(value: str, label: str) -> None:
@@ -954,7 +962,7 @@ def run_driver_sequence(steps: list[dict[str, Any]], timeout_seconds: float = 10
 	Waits for completion with an async kickoff plus a non-blocking poll loop (host sleep interval), so the UE game thread is
 	never blocked - to the caller it looks like any other synchronous tool. Must be enabled beforehand with
 	enable_automation_driver() (when inactive, the kickoff returns an explicit failure -
-	it does not crash; fixed 2026-07-10). Coordinate-based mouse is not supported - use simulate_pointer_input's
+	it does not crash). Coordinate-based mouse is not supported - use simulate_pointer_input's
 	backend='viewport' instead.
 
 	Args:
@@ -1048,71 +1056,6 @@ def disable_automation_driver(generation: int = 0) -> str:
 	)
 
 
-@mcp.tool()
-def replace_custom_event_with_bie(
-	wbp_path: str,
-	dry_run: bool = False,
-	save: bool = True,
-) -> str:
-	"""Swap a WBP's Custom Events for matching BlueprintImplementableEvent override nodes.
-
-	For each K2Node_CustomEvent whose name matches a native-parent BlueprintImplementableEvent
-	(FUNC_BlueprintEvent, native owner, no return/out-param), replace it with an override event
-	node and carry over the outgoing wiring — including reconstructed split struct sub-pins.
-	On signature mismatch or any rewire failure the event rolls back (old node preserved; new
-	node deleted only if the tool created it). Save is gated on real compile status
-	(DidBlueprintCompileSucceed) AND no leftover name collisions.
-
-	Prereq: the matching BIE must already be declared in C++ and built, so the native parent
-	class exposes it. Non-matching custom events are skipped (and reported). This does NOT fix
-	cross-asset callers — when a replaced event's BIE lacks BlueprintCallable it only warns;
-	run find_external_event_callers to locate at-risk callers.
-
-	Args:
-		wbp_path: WBP asset path. e.g. '/Game/UI/WB_Foo'.
-		dry_run: When True, report the replacement plan only — no mutation (default False).
-		save: Save dirty packages after a successful compile (default True). Ignored on dry_run.
-	Returns:
-		JSON with replaced / skipped / rolled_back / warnings / compiled / saved /
-		has_name_collision / message. success=False if any rollback or compile error.
-	"""
-	_validate_ue_path(wbp_path, "wbp_path")
-	return _run_script_with_params(
-		"replace_custom_event_with_bie.py",
-		WBP_PATH=wbp_path,
-		DRY_RUN=dry_run,
-		SAVE=save,
-	)
-
-
-@mcp.tool()
-def find_external_event_callers(target_wbp: str, function_names: list[str]) -> str:
-	"""Detect cross-asset callers that would break after a Custom Event → BIE swap (READ-ONLY).
-
-	When a replaced event's BIE lacks BlueprintCallable, any external asset that calls it through
-	a reference to the target WBP hard-errors on compile after the swap. This scans referencers of
-	the target for CallFunction nodes to each risky function (BIE && !BlueprintCallable) and
-	reports them. Detect/warn only — the real fix is a C++ decl change (add BlueprintCallable),
-	which is out of scope.
-
-	Args:
-		target_wbp: WBP whose events were/will be replaced. e.g. '/Game/UI/WB_Foo'.
-		function_names: Event names to check — typically the names replaced by
-			replace_custom_event_with_bie (from its report).
-	Returns:
-		JSON with risky_functions / safe_functions / confirmed_callers / possible_callers /
-		candidates_scanned / limitations / message.
-	"""
-	_validate_ue_path(target_wbp, "target_wbp")
-	if not isinstance(function_names, list) or len(function_names) == 0:
-		raise ValueError(f"function_names must be a non-empty list, got: {function_names!r}")
-	return _run_script_with_params(
-		"find_external_event_callers.py",
-		TARGET_WBP=target_wbp,
-		FUNCTION_NAMES_B64=_b64(function_names),
-	)
-
-
 def _b64_str(s: str) -> str:
 	"""Base64-encode a plain UTF-8 string (for safe placeholder injection)."""
 	return base64.b64encode(s.encode("utf-8")).decode("ascii")
@@ -1166,7 +1109,7 @@ def list_ue_nodes(discovery_timeout: float = 15.0) -> dict[str, Any]:
 		remote.start()
 		deadline = time.monotonic() + discovery_timeout
 		# Early-exit when node count has been stable for 1 second
-		# (cuts the default 5s wait to ~1s for the single-editor case).
+		# (cuts the 15 s wait to ~1 s for the single-editor case).
 		stable_since: float | None = None
 		last_count = -1
 		while time.monotonic() < deadline:
@@ -1245,20 +1188,21 @@ def list_ue_nodes(discovery_timeout: float = 15.0) -> dict[str, Any]:
 def select_ue_node(node_id: str) -> dict[str, Any]:
 	"""Pin this MCP server session to a specific Unreal Editor instance.
 
-	All subsequent tool calls (run_python, analyze_widget_tree, etc.) will route to
+	All subsequent tool calls (run_python, etc.) will route to
 	the editor with this node_id. The selection is in-memory and resets when the
 	MCP server process restarts. Use list_ue_nodes to find available node_ids.
 
 	Args:
 		node_id: Full node_id string from list_ue_nodes (e.g. the UUID-like string).
 	"""
-	global _SELECTED_NODE_ID
+	global _SELECTED_NODE_ID, _SELECTED_NODE_ROOT
 	node_id = node_id.strip()
 	if not node_id:
 		raise ValueError("node_id must not be empty. Use list_ue_nodes to find valid IDs.")
 
 	with _SELECTED_NODE_LOCK:
 		_SELECTED_NODE_ID = node_id
+		_SELECTED_NODE_ROOT = None
 
 	# Check if the node is currently visible (warning only — allow deferred binding)
 	remote = RemoteExecution(RemoteExecutionConfig())
@@ -1281,6 +1225,9 @@ def select_ue_node(node_id: str) -> dict[str, Any]:
 			pass
 
 	if found_meta is not None:
+		with _SELECTED_NODE_LOCK:
+			if _SELECTED_NODE_ID == node_id:
+				_SELECTED_NODE_ROOT = _norm_path(found_meta.get("project_root", "")) or None
 		return {
 			"selected": True,
 			"node_id": node_id,
@@ -1310,9 +1257,10 @@ def clear_ue_node() -> dict[str, Any]:
 	    this workspace (refuses if none match / >1 ambiguous — no silent cross-workspace).
 	  - Otherwise (no filter): routes to the single editor, or refuses if >1 are visible.
 	"""
-	global _SELECTED_NODE_ID
+	global _SELECTED_NODE_ID, _SELECTED_NODE_ROOT
 	with _SELECTED_NODE_LOCK:
 		_SELECTED_NODE_ID = None
+		_SELECTED_NODE_ROOT = None
 
 	if _ENV_DEFAULT_NODE_ID is not None:
 		return {

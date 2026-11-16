@@ -78,14 +78,14 @@ namespace
 				{
 					FScopeLock lock(&GPendingKeyLock);
 					FPendingKeyRelease const* const pending = GPendingKeys.Find(key);
-					if (nullptr != pending and generation == pending->Generation)
+					if (nullptr != pending && generation == pending->Generation)
 					{
 						pendingViewportClient = pending->ViewportClient;
 						bShouldRelease = true;
 						GPendingKeys.Remove(key);
 					}
 				}
-				if (bShouldRelease and pendingViewportClient.IsValid())
+				if (bShouldRelease && pendingViewportClient.IsValid())
 				{
 					InjectViewportKeyEvent(pendingViewportClient.Get(), key, false);
 				}
@@ -97,7 +97,7 @@ namespace
 bool URemoteExecutionBridgeViewportInputLibrary::SetPointerPosition(UObject* WorldContextObject, FVector2D ViewportPosition)
 {
 	UGameViewportClient* const viewportClient = ResolveGameViewportClient(WorldContextObject);
-	if (nullptr == viewportClient or nullptr == viewportClient->Viewport)
+	if (nullptr == viewportClient || nullptr == viewportClient->Viewport)
 	{
 		return false;
 	}
@@ -126,7 +126,7 @@ bool URemoteExecutionBridgeViewportInputLibrary::InjectViewportKey(UObject* Worl
 
 bool URemoteExecutionBridgeViewportInputLibrary::SimulateViewportClick(UObject* WorldContextObject, FVector2D ViewportPosition, FKey Button)
 {
-	if (not SetPointerPosition(WorldContextObject, ViewportPosition))
+	if (!SetPointerPosition(WorldContextObject, ViewportPosition))
 	{
 		return false;
 	}
@@ -142,7 +142,7 @@ bool URemoteExecutionBridgeViewportInputLibrary::SimulateViewportDrag(UObject* W
 	{
 		return false;	// At least 1 step required - 0 or less is caller misuse
 	}
-	if (not SetPointerPosition(WorldContextObject, FromViewportPosition))
+	if (!SetPointerPosition(WorldContextObject, FromViewportPosition))
 	{
 		return false;
 	}

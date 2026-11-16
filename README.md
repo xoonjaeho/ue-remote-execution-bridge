@@ -30,7 +30,6 @@ Ask in plain language and the AI writes Python and runs it inside the editor.
 - "Find the StaticMeshActors in the level that are missing a material."
 - "List the widget blueprints in the UI folder that have unused variables."
 - "Start PIE, press the 'Start' button in the lobby, and check that it moves on to the next screen."
-- "Replace this widget blueprint's Custom Events with overrides of the parent C++ class's BlueprintImplementableEvents."
 
 You can see the connection state from the dot at the right end of the editor toolbar. **Green** means the AI is attached; **red** means it is disconnected. Hover over the dot to see which Claude Code session (path, branch, PID) is attached.
 
@@ -39,7 +38,7 @@ You can see the connection state from the dot at the right end of the editor too
 | Path | Purpose |
 |---|---|
 | `mcp/ue_remote_execution_bridge/` | Python MCP server. Finds the editor, attaches to it, and runs code |
-| `Plugins/RemoteExecutionBridge/` | C++ editor plugin. Toolbar connection indicator, virtual PIE input, and engine features that Python lacks |
+| `Plugins/RemoteExecutionBridge/` | C++ editor plugin. Toolbar connection indicator, virtual PIE input injection, and a place to add your own UFUNCTIONs when Python lacks an API |
 | `Config/DefaultEngine.ini.snippet` | Settings that turn on Python remote execution in the editor |
 | `.mcp.json.example` | Example for registering the MCP server with Claude Code |
 

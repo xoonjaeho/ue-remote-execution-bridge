@@ -44,13 +44,13 @@ namespace
 		bool bShouldDisable = false;
 		{
 			FScopeLock lock(&GEnableLock);
-			if (not GLiveEnableGenerations.Remove(generation))
+			if (!GLiveEnableGenerations.Remove(generation))
 			{
 				return;	// Already released - prevents double release when a normal Disable races the safety timeout
 			}
 			bShouldDisable = GLiveEnableGenerations.IsEmpty();
 		}
-		if (bShouldDisable and IAutomationDriverModule::Get().IsEnabled())
+		if (bShouldDisable && IAutomationDriverModule::Get().IsEnabled())
 		{
 			IAutomationDriverModule::Get().Disable();
 		}
@@ -69,7 +69,7 @@ namespace
 	bool ParseKeyField(FJsonObject const& stepObject, TCHAR const* fieldName, FKey& outKey)
 	{
 		FString keyName;
-		if (not stepObject.TryGetStringField(fieldName, keyName))
+		if (!stepObject.TryGetStringField(fieldName, keyName))
 		{
 			return false;
 		}
@@ -80,12 +80,12 @@ namespace
 	// Apply one object of the StepsJson array to the queue. Returns false on failure - the caller discards the whole sequence.
 	bool AppendStep(IAsyncActionSequence& actions, TSharedPtr<FJsonObject> const& stepObject)
 	{
-		if (not stepObject.IsValid())
+		if (!stepObject.IsValid())
 		{
 			return false;
 		}
 		FString action;
-		if (not stepObject->TryGetStringField(TEXT("action"), action))
+		if (!stepObject->TryGetStringField(TEXT("action"), action))
 		{
 			return false;
 		}
@@ -93,7 +93,7 @@ namespace
 		if (TEXT("press") == action)
 		{
 			FKey key;
-			if (not ParseKeyField(*stepObject, TEXT("key"), key))
+			if (!ParseKeyField(*stepObject, TEXT("key"), key))
 			{
 				return false;
 			}
@@ -103,7 +103,7 @@ namespace
 		if (TEXT("release") == action)
 		{
 			FKey key;
-			if (not ParseKeyField(*stepObject, TEXT("key"), key))
+			if (!ParseKeyField(*stepObject, TEXT("key"), key))
 			{
 				return false;
 			}
@@ -113,7 +113,7 @@ namespace
 		if (TEXT("press_chord") == action)
 		{
 			TArray<TSharedPtr<FJsonValue>> const* keysArray = nullptr;
-			if (not stepObject->TryGetArrayField(TEXT("keys"), keysArray) or nullptr == keysArray)
+			if (!stepObject->TryGetArrayField(TEXT("keys"), keysArray) || nullptr == keysArray)
 			{
 				return false;
 			}
@@ -132,7 +132,7 @@ namespace
 		if (TEXT("type") == action)
 		{
 			FString text;
-			if (not stepObject->TryGetStringField(TEXT("text"), text))
+			if (!stepObject->TryGetStringField(TEXT("text"), text))
 			{
 				return false;
 			}
@@ -142,7 +142,7 @@ namespace
 		if (TEXT("wait") == action)
 		{
 			double seconds = 0.0;
-			if (not stepObject->TryGetNumberField(TEXT("seconds"), seconds))
+			if (!stepObject->TryGetNumberField(TEXT("seconds"), seconds))
 			{
 				return false;
 			}
@@ -188,7 +188,7 @@ bool URemoteExecutionBridgeAutomationDriverLibrary::DisableAutomationDriver(int6
 		if (0 != Generation)
 		{
 			uint64 const requested = static_cast<uint64>(Generation);
-			if (not GLiveEnableGenerations.Contains(requested))
+			if (!GLiveEnableGenerations.Contains(requested))
 			{
 				return false;	// Already released or nonexistent generation - includes the case where another call took it first
 			}
@@ -205,20 +205,20 @@ bool URemoteExecutionBridgeAutomationDriverLibrary::DisableAutomationDriver(int6
 
 FString URemoteExecutionBridgeAutomationDriverLibrary::RunDriverSequence(FString const& StepsJson)
 {
-	if (not IsPieRunning())
+	if (!IsPieRunning())
 	{
 		return FString();	// No PIE - explicit failure
 	}
-	if (not IAutomationDriverModule::Get().IsEnabled())
+	if (!IAutomationDriverModule::Get().IsEnabled())
 	{
 		// CreateAsyncDriver() calls AutomatedApplication.ToSharedRef() internally - in the Disabled state (nullptr),
-		// the IsValid() assert crashes the whole editor (observed 2026-07-10). Must explicitly fail beforehand.
+		// the IsValid() assert crashes the whole editor (observed). Must explicitly fail beforehand.
 		return FString();
 	}
 
 	TArray<TSharedPtr<FJsonValue>> stepsArray;
 	TSharedRef<TJsonReader<>> const jsonReader = TJsonReaderFactory<>::Create(StepsJson);
-	if (not FJsonSerializer::Deserialize(jsonReader, stepsArray))
+	if (!FJsonSerializer::Deserialize(jsonReader, stepsArray))
 	{
 		return FString();
 	}
@@ -230,7 +230,7 @@ FString URemoteExecutionBridgeAutomationDriverLibrary::RunDriverSequence(FString
 	for (TSharedPtr<FJsonValue> const& stepValue : stepsArray)
 	{
 		TSharedPtr<FJsonObject> const stepObject = stepValue.IsValid() ? stepValue->AsObject() : nullptr;
-		if (not AppendStep(actions, stepObject))
+		if (!AppendStep(actions, stepObject))
 		{
 			return FString();	// Step parsing failed - a partially queued sequence is discarded without calling Perform
 		}
@@ -254,7 +254,7 @@ bool URemoteExecutionBridgeAutomationDriverLibrary::PollDriverSequence(FString c
 	bOutSuccess = false;
 
 	FGuid handleGuid;
-	if (not FGuid::Parse(Handle, handleGuid))
+	if (!FGuid::Parse(Handle, handleGuid))
 	{
 		return false;
 	}
@@ -267,7 +267,7 @@ bool URemoteExecutionBridgeAutomationDriverLibrary::PollDriverSequence(FString c
 	}
 
 	TFuture<bool> const& future = pending->Result.GetFuture();
-	if (not future.IsReady())
+	if (!future.IsReady())
 	{
 		return true;	// Still in progress - normal state with bOutDone=false
 	}

@@ -14,7 +14,7 @@ try:
         raise SystemExit(0)
 
     poll = unreal.RemoteExecutionBridgeAutomationDriverLibrary.poll_driver_sequence(HANDLE)
-    # Measured on the UE Python binding (2026-07-10): a bool return plus two bool& comes back as a (bOutDone, bOutSuccess) tuple on success,
+    # Measured on the UE Python binding: a bool return plus two bool& comes back as a (bOutDone, bOutSuccess) tuple on success,
     # and as None on failure (handle does not exist) - the returned bool itself is not included in the tuple.
     if isinstance(poll, tuple) and len(poll) == 2:
         done, done_success = poll

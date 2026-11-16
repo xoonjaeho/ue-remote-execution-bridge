@@ -23,6 +23,8 @@ Pitfalls the AI found through trial and error go in a section of "Common snippet
 
 > **Scope**: This table is the automatically aggregated history of glue APIs used in `run_python` scripts (it is not a curated or recommended list). For simple asset/data manipulation, prefer the official unreal-mcp (`AssetTools`, `DataTableTools`, etc.); use this table as a reference when writing `run_python` for work the official toolsets don't cover. The rows below are initial values, keeping only general-purpose APIs from real usage history — running `update_cheatsheet` fills in the Count.
 
+Period: - ~ - (0 entries)
+
 | API | Count | Last seen | Notes |
 |---|---:|---|---|
 | `unreal.load_asset` |  |  | Load an asset by path (most common entry) |
@@ -99,7 +101,7 @@ unreal.EditorAssetLibrary.save_asset('/Game/Data/DT_Foo')
 
 ### Creating a WBP instance to verify BIE / graph bodies (without PIE)
 
-The widget render tool **takes only an asset path and can't call events** — to see whether a BIE or graph body actually runs, create an instance, call the event, and read back the resulting properties (the verdict is also more reliable than pixels).
+A static asset render (a tool that takes only an asset path) **can't call events** — to see whether a BIE or graph body actually runs, create an instance, call the event, and read back the resulting properties (the verdict is also more reliable than pixels).
 
 ```python
 cls = unreal.EditorAssetLibrary.load_blueprint_class('/Game/UI/WB_Foo')

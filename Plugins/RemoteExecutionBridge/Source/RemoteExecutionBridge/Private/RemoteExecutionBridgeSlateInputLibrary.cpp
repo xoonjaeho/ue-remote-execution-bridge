@@ -36,7 +36,7 @@ namespace
 
 	// Get the native window from the GameViewportClient's SWindow. If null is passed for the Down event, Slate cannot
 	// establish mouse capture, so HasMouseCapture()==false at Up time and the CommonUI button click is silently ignored
-	// (observed 2026-07-10 - confirmed via debug logging).
+	// (confirmed via debug logging).
 	TSharedPtr<FGenericWindow> ResolveNativeWindowFromViewportClient(UGameViewportClient* viewportClient)
 	{
 		if (nullptr == viewportClient)
@@ -63,7 +63,7 @@ namespace
 		return ResolveNativeWindowFromViewportClient(nullptr != GEngine ? GEngine->GameViewport : nullptr);
 	}
 
-	// Mouse capture establishment was observed to depend on the OS-level foreground state (2026-07-10) - if a synthetic click is injected
+	// Mouse capture establishment was observed to depend on the OS-level foreground state - if a synthetic click is injected
 	// while the editor window is not foreground (e.g. a command is running from a terminal), HasMouseCapture()
 	// intermittently becomes false and the click is silently ignored. Force a foreground switch before injecting Down.
 	void ForceWindowForeground(TSharedPtr<FGenericWindow> const& platformWindow)
@@ -98,7 +98,7 @@ namespace
 
 			// Send a Move to the position before Down first to establish Hover - SButton::OnMouseButtonUp decides
 			// bEventOverButton only via IsHovered() for non-touch events (no geometry fallback), so injecting just Down/Up
-			// without a Move gets capture but the click is silently ignored (observed 2026-07-10 - confirmed via debug logging).
+			// without a Move gets capture but the click is silently ignored (confirmed via debug logging).
 			// With identical Last/New positions it is processed as a zero-delta event and may be ignored, so fake a real move with a 1px offset.
 			FVector2D const priorPosition = absolutePosition - FVector2D(1.0, 1.0);
 			FPointerEvent const moveEvent(
@@ -107,7 +107,7 @@ namespace
 				TSet<FKey>{}, button, 0.0f, FModifierKeysState());
 			slate.ProcessMouseMoveEvent(moveEvent);
 
-			// Routing directly via RoutePointer* was observed to crash from conflicts with off-game-thread entry and capture state (2026-06-11) - keep ProcessMouse*.
+			// Routing directly via RoutePointer* was observed to crash from conflicts with off-game-thread entry and capture state - keep ProcessMouse*.
 			slate.ProcessMouseButtonDownEvent(platformWindow, event);
 		}
 		else
@@ -140,14 +140,14 @@ namespace
 				{
 					FScopeLock lock(&GPendingButtonLock);
 					FPendingButtonRelease const* const pending = GPendingButtons.Find(button);
-					if (nullptr != pending and generation == pending->Generation)
+					if (nullptr != pending && generation == pending->Generation)
 					{
 						releasePosition = pending->AbsolutePosition;
 						bShouldRelease = true;
 						GPendingButtons.Remove(button);
 					}
 				}
-				if (bShouldRelease and FSlateApplication::IsInitialized())
+				if (bShouldRelease && FSlateApplication::IsInitialized())
 				{
 					InjectPointerButtonEvent(releasePosition, button, false);
 				}
@@ -163,12 +163,12 @@ FVector2D URemoteExecutionBridgeSlateInputLibrary::ViewportToAbsolutePosition(UO
 		return FVector2D::ZeroVector;
 	}
 	UWorld* const world = WorldContextObject->GetWorld();
-	if (nullptr == world or nullptr == world->GetGameViewport())
+	if (nullptr == world || nullptr == world->GetGameViewport())
 	{
 		return FVector2D::ZeroVector;
 	}
 	TSharedPtr<SViewport> const viewportWidget = world->GetGameViewport()->GetGameViewportWidget();
-	if (not viewportWidget.IsValid())
+	if (!viewportWidget.IsValid())
 	{
 		return FVector2D::ZeroVector;
 	}
@@ -181,7 +181,7 @@ FVector2D URemoteExecutionBridgeSlateInputLibrary::ViewportToAbsolutePosition(UO
 
 bool URemoteExecutionBridgeSlateInputLibrary::SimulatePointerDown(UObject* WorldContextObject, FVector2D ViewportPosition, FKey Button)
 {
-	if (not FSlateApplication::IsInitialized())
+	if (!FSlateApplication::IsInitialized())
 	{
 		return false;
 	}
@@ -193,7 +193,7 @@ bool URemoteExecutionBridgeSlateInputLibrary::SimulatePointerDown(UObject* World
 
 bool URemoteExecutionBridgeSlateInputLibrary::SimulatePointerUp(UObject* WorldContextObject, FVector2D ViewportPosition, FKey Button)
 {
-	if (not FSlateApplication::IsInitialized())
+	if (!FSlateApplication::IsInitialized())
 	{
 		return false;
 	}
@@ -205,7 +205,7 @@ bool URemoteExecutionBridgeSlateInputLibrary::SimulatePointerUp(UObject* WorldCo
 
 bool URemoteExecutionBridgeSlateInputLibrary::SimulateClick(UObject* WorldContextObject, FVector2D ViewportPosition, FKey Button)
 {
-	if (not FSlateApplication::IsInitialized())
+	if (!FSlateApplication::IsInitialized())
 	{
 		return false;
 	}
@@ -217,7 +217,7 @@ bool URemoteExecutionBridgeSlateInputLibrary::SimulateClick(UObject* WorldContex
 
 bool URemoteExecutionBridgeSlateInputLibrary::SimulateDrag(UObject* WorldContextObject, FVector2D FromViewportPosition, FVector2D ToViewportPosition, FKey Button, int32 Steps)
 {
-	if (not FSlateApplication::IsInitialized())
+	if (!FSlateApplication::IsInitialized())
 	{
 		return false;
 	}
@@ -250,7 +250,7 @@ bool URemoteExecutionBridgeSlateInputLibrary::SimulateDrag(UObject* WorldContext
 
 bool URemoteExecutionBridgeSlateInputLibrary::SimulateClickOnWidget(UWidget* Widget)
 {
-	if (nullptr == Widget or not FSlateApplication::IsInitialized())
+	if (nullptr == Widget || !FSlateApplication::IsInitialized())
 	{
 		return false;
 	}
@@ -270,7 +270,7 @@ bool URemoteExecutionBridgeSlateInputLibrary::SimulateClickOnWidget(UWidget* Wid
 
 bool URemoteExecutionBridgeSlateInputLibrary::SimulateClickAtAbsolutePosition(FVector2D AbsolutePosition)
 {
-	if (not FSlateApplication::IsInitialized())
+	if (!FSlateApplication::IsInitialized())
 	{
 		return false;
 	}
@@ -281,7 +281,7 @@ bool URemoteExecutionBridgeSlateInputLibrary::SimulateClickAtAbsolutePosition(FV
 
 bool URemoteExecutionBridgeSlateInputLibrary::InjectKeyDown(FKey Key)
 {
-	if (not FSlateApplication::IsInitialized())
+	if (!FSlateApplication::IsInitialized())
 	{
 		return false;
 	}
@@ -291,7 +291,7 @@ bool URemoteExecutionBridgeSlateInputLibrary::InjectKeyDown(FKey Key)
 
 bool URemoteExecutionBridgeSlateInputLibrary::InjectKeyUp(FKey Key)
 {
-	if (not FSlateApplication::IsInitialized())
+	if (!FSlateApplication::IsInitialized())
 	{
 		return false;
 	}
@@ -301,7 +301,7 @@ bool URemoteExecutionBridgeSlateInputLibrary::InjectKeyUp(FKey Key)
 
 bool URemoteExecutionBridgeSlateInputLibrary::InjectKeyChar(FString const& Text)
 {
-	if (not FSlateApplication::IsInitialized())
+	if (!FSlateApplication::IsInitialized())
 	{
 		return false;
 	}
@@ -311,14 +311,14 @@ bool URemoteExecutionBridgeSlateInputLibrary::InjectKeyChar(FString const& Text)
 	for (TCHAR const character : Text)
 	{
 		FCharacterEvent const event(character, FModifierKeysState(), 0u, false);
-		bAllHandled = slate.ProcessKeyCharEvent(event) and bAllHandled;
+		bAllHandled = slate.ProcessKeyCharEvent(event) && bAllHandled;
 	}
 	return bAllHandled;
 }
 
 bool URemoteExecutionBridgeSlateInputLibrary::FocusGameViewport()
 {
-	if (not FSlateApplication::IsInitialized())
+	if (!FSlateApplication::IsInitialized())
 	{
 		return false;
 	}

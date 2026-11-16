@@ -20,12 +20,5 @@ mcp/ue_remote_execution_bridge/src/.sessions/
 .vs/
 .idea/
 
-# Local-only docs - synced scaffolds (.claude/rules/) and internal docs, never committed (see docs/SETUP.md)
-# Root-anchored: nested distributable docs (e.g. mcp/.../docs/) stay tracked.
-/.claude/
-/docs/
-
-# >>> scaffolds >>>
 # Serena MCP writes this on project activation
 .serena/
-# <<< scaffolds <<<
