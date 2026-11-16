@@ -558,12 +558,13 @@ _ISO_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _PERIOD_LINE_RE = re.compile(r"^(\S+(?:[ \t]+\S+)*): (\S+) ~ \S+ \((\d+) entries\)$", re.MULTILINE)
 
 
-def _parse_usage_log(text: str) -> tuple[int, dict[str, dict[str, Any]], str]:
-	"""Parse usage.log text → (total_entries, {api: {'count': int, 'last_seen': 'YYYY-MM-DD'}}, min_date)."""
+def _parse_usage_log(text: str) -> tuple[int, dict[str, dict[str, Any]], str, str]:
+	"""Parse usage.log text → (total_entries, {api: {'count': int, 'last_seen': 'YYYY-MM-DD'}}, min_date, max_date)."""
 	counts: dict[str, int] = {}
 	last_seen: dict[str, str] = {}
 	total = 0
 	min_date = ""
+	max_date = ""
 	text = text.replace("\r\n", "\n")
 	for entry in _ENTRY_SEP_RE.split(text):
 		entry = entry.strip()
@@ -577,6 +578,8 @@ def _parse_usage_log(text: str) -> tuple[int, dict[str, dict[str, Any]], str]:
 		total += 1
 		if not min_date or date < min_date:
 			min_date = date
+		if date > max_date:
+			max_date = date
 		seen: set[str] = set()
 		for m in _API_RE.finditer(body):
 			seen.add("unreal." + m.group(1))
@@ -585,7 +588,7 @@ def _parse_usage_log(text: str) -> tuple[int, dict[str, dict[str, Any]], str]:
 			if api not in last_seen or last_seen[api] < date:
 				last_seen[api] = date
 	delta = {api: {"count": c, "last_seen": last_seen[api]} for api, c in counts.items()}
-	return total, delta, min_date
+	return total, delta, min_date, max_date
 
 
 def _parse_cheatsheet_table(text: str) -> tuple[list[str], list[str], list[dict[str, Any]], list[str]]:
@@ -642,7 +645,7 @@ def _update_cheatsheet(dry_run: bool = False) -> dict[str, Any]:
 		return {"status": "no-op", "message": "usage.log does not exist."}
 	with _usage_lock:
 		log_text = USAGE_LOG_PATH.read_text(encoding="utf-8")
-	total, delta, min_log_date = _parse_usage_log(log_text)
+	total, delta, min_log_date, max_date = _parse_usage_log(log_text)
 	if total == 0:
 		return {"status": "no-op", "message": "usage.log is empty.", "entries_processed": 0}
 
@@ -675,7 +678,6 @@ def _update_cheatsheet(dry_run: bool = False) -> dict[str, Any]:
 
 	# Update period line in `pre`. The label is preserved verbatim, so the file
 	# can stay in any language while server.py contains no localized literal.
-	max_date = max((info["last_seen"] for info in delta.values()), default="")
 	new_total = total
 	for i, l in enumerate(pre):
 		m = _PERIOD_LINE_RE.search(l)
