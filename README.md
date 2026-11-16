@@ -9,7 +9,7 @@ Starting with UE 5.8, Epic ships an official MCP (unreal-mcp), but the official 
 | What it can do | Only prebuilt tools (asset search, start PIE, log queries, etc.) | The whole editor Python API — the AI writes and runs code on the spot |
 | When you hit a wall | Wait, or build a new tool | For engine features missing from Python, add one function to the C++ plugin and call it right away |
 | The more you use it | Stays the same | Code the AI has run piles up and is distilled into a cheatsheet of frequently used APIs and pitfalls, so the AI in the next session doesn't repeat the same mistakes |
-| PIE control | Start / stop | Injects button clicks, drags, and key input straight into PIE, so it can step through screens to verify |
+| PIE control | Start / stop, plus click, drag and key presses on Slate widgets picked by reference (experimental SlateInspector toolset) | Click, drag, long press and key input at screen coordinates, through Slate or the game viewport's own input path, plus AutomationDriver key sequences — so it can step through game screens to verify |
 
 Use the two MCPs together: the official toolsets for the fixed jobs, this bridge for everything else.
 

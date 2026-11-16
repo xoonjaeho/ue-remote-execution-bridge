@@ -72,7 +72,7 @@ ctypes.windll.kernel32.ReleaseMutex(_mutex)
 
 > When a signature changes, edit this table first.
 
-PIE start/stop, Output Log queries, asset search/save/move, and DataTable queries are not in this server — use the toolsets of Epic's official unreal-mcp (the ModelContextProtocol plugin) built into UE 5.8 and later. This server handles what the official toolsets can't do (arbitrary Python, virtual PIE input).
+PIE start/stop, Output Log queries, asset search/save/move, and DataTable queries are not in this server — use the toolsets of Epic's official unreal-mcp (the ModelContextProtocol plugin) built into UE 5.8 and later. This server handles what the official toolsets can't do: arbitrary Python, and PIE input at screen coordinates or through the game viewport (the official SlateInspector toolset only targets Slate widgets by reference).
 
 | Tool | Parameters (defaults) | Description |
 |---|---|---|
