@@ -209,11 +209,16 @@ _SESSION_LOCK_FILE.write_text(str(_PID), encoding="utf-8")
 # ---------------------------------------------------------------------------
 
 _HEARTBEAT_INTERVAL = 2.0
+_HEARTBEAT_MAX_INTERVAL = 30.0
 _EAGER_DISCOVERY_TIMEOUT = 2.0
 # With editors open in several workspaces at once, not every PONG returns within 5 s,
 # so a live editor was sometimes reported as absent (measured: not found at 5 s, found at 12 s).
 _DISCOVERY_TIMEOUT = 15.0
 _MUTEX_ACQUIRE_TIMEOUT_MS = 15000
+# Longest stretch a poll holds one connection (= the mutex). Other sessions fail after _MUTEX_ACQUIRE_TIMEOUT_MS
+# and the editor badge turns disconnected after 12 s without a heartbeat (RemoteExecutionStatusMonitor
+# BridgeTimeoutSeconds), so this must stay well below both.
+_POLL_SEGMENT_SECONDS = 5.0
 
 _session_announced = False
 _usage_lock = threading.Lock()
@@ -368,31 +373,54 @@ def _open_remote(
 		return remote, node_id
 	except RuntimeError:
 		raise
-	except Exception:
+	except Exception as exc:
+		logging.warning("UE discovery/connect failed: %r", exc)
 		try:
 			remote.stop()
 		except Exception:
 			pass
+		if strict:
+			raise RuntimeError(f"UE discovery/connect failed: {exc}") from exc
 		return None
 
 
-def _try_heartbeat() -> None:
+def _try_heartbeat() -> bool:
+	"""Returns whether the editor was discovered (a discovery error counts as not found).
+	A round that yields the mutex to another connection (not free within 100ms) still counts
+	as discovered, so _heartbeat_loop retries soon instead of backing off."""
 	global _session_announced
-	if not _acquire_ue_mutex(timeout_ms=100):
-		return
+	preferred = _resolve_target_node_id()
+	remote = None
 	try:
-		preferred = _resolve_target_node_id()
-		result = _open_remote(
+		remote = RemoteExecution(RemoteExecutionConfig())
+		# Discover outside the mutex - holding it through up to 2 s of discovery blocks other sessions' connections
+		node_id = _discover_node(
+			remote,
 			_EAGER_DISCOVERY_TIMEOUT,
 			preferred_node_id=preferred,
 			strict=False,
 			project_root_filter=None if preferred else _PROJECT_ROOT_FILTER,
 		)
-		if result is None:
-			if preferred is not None:
-				logging.debug("Heartbeat skipped: target node '%s' not currently visible.", preferred)
-			return
-		remote, node_id = result
+	except Exception as exc:
+		logging.debug("Heartbeat discovery failed: %r", exc)
+		if remote is not None:
+			try:
+				remote.stop()
+			except Exception:
+				pass
+		return False
+	if node_id is None:
+		if preferred is not None:
+			logging.debug("Heartbeat skipped: target node '%s' not currently visible.", preferred)
+		return False
+	if not _acquire_ue_mutex(timeout_ms=100):
+		try:
+			remote.stop()
+		except Exception:
+			pass
+		return True
+	try:
+		_connect_node(remote, node_id)
 		try:
 			active = _count_active_sessions()
 			session_lines = _session_lines() if active == 1 else ""
@@ -425,12 +453,21 @@ def _try_heartbeat() -> None:
 		pass
 	finally:
 		_release_ue_mutex()
+	return True
 
 
 def _heartbeat_loop() -> None:
+	# Back off to 2/4/8/16/30 s while no editor is found, instead of running UDP discovery every 2 s
+	delay = _HEARTBEAT_INTERVAL
+	missed = False
 	while True:
-		time.sleep(_HEARTBEAT_INTERVAL)
-		_try_heartbeat()
+		time.sleep(delay)
+		if _try_heartbeat():
+			delay, missed = _HEARTBEAT_INTERVAL, False
+		elif missed:
+			delay = min(delay * 2, _HEARTBEAT_MAX_INTERVAL)
+		else:
+			missed = True
 
 
 threading.Thread(target=_heartbeat_loop, daemon=True).start()
@@ -440,17 +477,18 @@ threading.Thread(target=_heartbeat_loop, daemon=True).start()
 # ---------------------------------------------------------------------------
 
 
-def _assert_workspace(remote: RemoteExecution) -> None:
+def _assert_workspace(remote: RemoteExecution, then_code: str) -> None:
 	"""Abort if the connected editor's live project_dir != this workspace.
 	Last line of defense — the discovery filter trusts the PONG; this re-checks
-	against the editor's actual unreal.Paths so a stale/wrong PONG can't slip through."""
+	against the editor's actual unreal.Paths so a stale/wrong PONG can't slip through.
+	then_code rides in the same command and runs only after the check passes (one round trip)."""
 	guard = (
 		"import unreal, os\n"
 		"_p = unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_dir())\n"
 		f"assert os.path.normcase(os.path.normpath(_p)) == {json.dumps(_PROJECT_ROOT_FILTER)}, "
 		"'WORKSPACE_MISMATCH:' + _p\n"
 	)
-	res = remote.run_command(guard, unattended=True, exec_mode=MODE_EXEC_FILE, raise_on_failure=False)
+	res = remote.run_command(guard + then_code, unattended=True, exec_mode=MODE_EXEC_FILE, raise_on_failure=False)
 	if not res.get("success"):
 		raise RuntimeError(
 			f"Workspace guard failed — connected editor is not this workspace "
@@ -474,7 +512,12 @@ def _set_connected_code(node_id: str) -> str:
 		"try:\n"
 		f"    unreal.RemoteExecutionBridgeLibrary.set_connected_node_id({json.dumps(node_id)})\n"
 		+ (_session_lines() if _count_active_sessions() == 1 else "")
-		+ "except AttributeError:\n"
+		# A poll releases the mutex for only 0.2 s per segment, so the heartbeat (which waits 100 ms) rarely
+		# gets in - refresh the badge timestamp on every connection
+		+ "    unreal.RemoteExecutionBridgeLibrary.heartbeat()\n"
+		# This rides in the same command as the workspace guard; a display-update failure must not surface as
+		# a guard failure, so ignore it as when it was sent on its own
+		+ "except Exception:\n"
 		"    pass\n"
 	)
 
@@ -532,13 +575,14 @@ def _ue_connection() -> Generator[RemoteExecution, None, None]:
 			# workspace before any command runs — survives a stale/incorrect discovery PONG.
 			# Skipped when an explicit pin is set (user deliberately chose that editor).
 			if _PROJECT_ROOT_FILTER and preferred is None:
-				_assert_workspace(remote)
-			remote.run_command(
-				_set_connected_code(node_id),
-				unattended=True,
-				exec_mode=MODE_EXEC_FILE,
-				raise_on_failure=False,
-			)
+				_assert_workspace(remote, _set_connected_code(node_id))
+			else:
+				remote.run_command(
+					_set_connected_code(node_id),
+					unattended=True,
+					exec_mode=MODE_EXEC_FILE,
+					raise_on_failure=False,
+				)
 			yield remote
 		finally:
 			try:
@@ -1037,21 +1081,31 @@ def run_driver_sequence(steps: list[dict[str, Any]], timeout_seconds: float = 10
 
 	handle = kickoff["handle"]
 	poll_interval = 0.2
+	poll_code = _render_script("driver_sequence_poll.py", HANDLE=handle)
 	deadline = time.monotonic() + timeout_seconds
 	while time.monotonic() < deadline:
-		poll_json = _run_script_with_params("driver_sequence_poll.py", HANDLE=handle)
-		poll = json.loads(poll_json)
-		if poll.get("done"):
-			return json.dumps(
-				{
-					"success": True,
-					"handle": handle,
-					"done": True,
-					"sequence_success": bool(poll.get("done_success")),
-					"message": poll.get("message", ""),
-				},
-				ensure_ascii=False,
-			)
+		# Connecting per tick repeats discovery, connect and guard every tick; one connection to the end holds the mutex too long
+		segment_end = min(time.monotonic() + _POLL_SEGMENT_SECONDS, deadline)
+		with _ue_connection() as remote:
+			while True:
+				poll = json.loads(_script_json(_command_result(remote.run_command(
+					poll_code, unattended=True, exec_mode=MODE_EXEC_FILE, raise_on_failure=False
+				))))
+				if poll.get("done"):
+					return json.dumps(
+						{
+							"success": True,
+							"handle": handle,
+							"done": True,
+							"sequence_success": bool(poll.get("done_success")),
+							"message": poll.get("message", ""),
+						},
+						ensure_ascii=False,
+					)
+				if time.monotonic() + poll_interval >= segment_end:
+					break
+				time.sleep(poll_interval)
+		# Wait between segments outside the mutex - the heartbeat, which waits only 100 ms, can take it in this gap
 		time.sleep(poll_interval)
 
 	return json.dumps(
