@@ -259,7 +259,6 @@ _MUTEX_ACQUIRE_TIMEOUT_MS = 15000
 _POLL_SEGMENT_SECONDS = 5.0
 
 _session_announced = False
-_usage_lock = threading.Lock()
 
 # Node selection state — priority: session > env UE_NODE_ID > fallback (remote_nodes[0])
 _ENV_DEFAULT_NODE_ID: str | None = os.environ.get("UE_NODE_ID")
@@ -673,13 +672,32 @@ def _command_result(result: dict[str, Any]) -> dict[str, Any]:
 # Usage logging
 # ---------------------------------------------------------------------------
 
+# Serialize usage.log writes and merges across sessions. Appending with "a" is not atomic on Windows, so two sessions
+# writing at once overwrite each other, and two overlapping merges both add the same snapshot. A Win32 mutex is owned
+# by a thread, so it also serializes worker threads within one session
+_USAGE_MUTEX_NAME = "Local\\UE_RemoteExecution_Bridge_Usage"
+_USAGE_MUTEX_TIMEOUT_MS = 10000
+_usage_mutex = _kernel32.CreateMutexW(None, False, _USAGE_MUTEX_NAME)
+if not _usage_mutex:
+	raise OSError(f"CreateMutexW failed: {ctypes.get_last_error()}")
+
+
+@contextmanager
+def _hold_usage_mutex() -> Generator[None, None, None]:
+	if _kernel32.WaitForSingleObject(_usage_mutex, _USAGE_MUTEX_TIMEOUT_MS) not in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
+		raise TimeoutError(f"usage.log mutex not acquired within {_USAGE_MUTEX_TIMEOUT_MS} ms")
+	try:
+		yield
+	finally:
+		_kernel32.ReleaseMutex(_usage_mutex)
+
 
 def _log_usage(code: str) -> None:
 	entry = f"---\n{datetime.now(timezone.utc).isoformat()}\n{code}\n"
-	# Opening fails with PermissionError at the moment another process's _snapshot_usage_log renames the file - reopen the new usage.log shortly after
+	# A session that has not restarted renames without this mutex, so opening at that instant fails with PermissionError - reopen the new usage.log shortly after
 	for attempt in range(_SNAPSHOT_RENAME_RETRIES + 1):
 		try:
-			with _usage_lock, open(USAGE_LOG_PATH, "a", encoding="utf-8") as f:
+			with _hold_usage_mutex(), open(USAGE_LOG_PATH, "a", encoding="utf-8") as f:
 				f.write(entry)
 			return
 		except PermissionError:
@@ -781,16 +799,16 @@ _SNAPSHOT_RENAME_INTERVAL = 0.05
 
 
 def _snapshot_usage_log() -> None:
-	# Rename instead of read-then-clear - while another process has the file open for append, os.replace fails with
-	# PermissionError (open() does not share delete access), and appends after the rename create a new usage.log.
-	# So entries written between reading and clearing are not lost. Opening fails at the instant of the rename -
-	# _log_usage reopens, but a session that has not restarted loses that one entry
+	"""Caller holds _hold_usage_mutex()."""
+	# Rename instead of read-then-clear - a session that has not restarted writes without the mutex. While it has the
+	# file open for append, os.replace fails with PermissionError (open() does not share delete access), and appends
+	# after the rename create a new usage.log. So entries written between reading and clearing are not lost. That
+	# session's open fails at the instant of the rename
 	# Named *.log so a snapshot left behind by a failure stays ignored like usage.log
 	snapshot = USAGE_LOG_PATH.with_name(f"{USAGE_LOG_PATH.name}.{_PID}.{time.time_ns()}.snap.log")
 	for attempt in range(_SNAPSHOT_RENAME_RETRIES + 1):
 		try:
-			with _usage_lock:
-				os.replace(USAGE_LOG_PATH, snapshot)
+			os.replace(USAGE_LOG_PATH, snapshot)
 			return
 		except FileNotFoundError:
 			return
@@ -805,6 +823,12 @@ def _update_cheatsheet(dry_run: bool = False) -> dict[str, Any]:
 
 	When dry_run=True, returns the planned delta without modifying any files.
 	"""
+	with _hold_usage_mutex():
+		return _merge_usage_into_cheatsheet(dry_run)
+
+
+def _merge_usage_into_cheatsheet(dry_run: bool) -> dict[str, Any]:
+	"""Caller holds _hold_usage_mutex()."""
 	if not dry_run:
 		_snapshot_usage_log()
 	# Every snapshot left, not just this one - a call that failed before replacing the sheet keeps its snapshot for the next call to merge
@@ -812,8 +836,7 @@ def _update_cheatsheet(dry_run: bool = False) -> dict[str, Any]:
 	texts = [s.read_text(encoding="utf-8") for s in snapshots]
 	if dry_run:
 		try:
-			with _usage_lock:
-				texts.append(USAGE_LOG_PATH.read_text(encoding="utf-8"))
+			texts.append(USAGE_LOG_PATH.read_text(encoding="utf-8"))
 		except FileNotFoundError:
 			pass
 	if not texts:

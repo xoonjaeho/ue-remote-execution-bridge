@@ -215,7 +215,7 @@ print(unreal.SystemLibrary.get_engine_version())
 ---
 ```
 
-Aggregation is handled by the MCP tool `update_cheatsheet` — it extracts symbols with the regex `unreal\.[A-Za-z0-9_.]+` and merges them into the `docs/CHEATSHEET.md` frequency table. Instead of reading and then clearing `src/usage.log`, it renames the file to a snapshot, so entries another session writes between the read and the clear are not lost. The sheet is replaced through a temp file, and a snapshot left by a failed replace is merged by the next call.
+Aggregation is handled by the MCP tool `update_cheatsheet` — it extracts symbols with the regex `unreal\.[A-Za-z0-9_.]+` and merges them into the `docs/CHEATSHEET.md` frequency table. Instead of reading and then clearing `src/usage.log`, it renames the file to a snapshot, so entries another session writes between the read and the clear are not lost. The sheet is replaced through a temp file, and a snapshot left by a failed replace is merged by the next call. `_log_usage` writes and the whole merge are serialized across sessions by the named mutex `Local\UE_RemoteExecution_Bridge_Usage` - appends are not atomic on Windows, so two sessions writing at once overwrite each other, and two overlapping merges both add the same snapshot.
 
 ---
 
