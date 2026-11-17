@@ -73,8 +73,39 @@ def _try_accept(self: Any, broadcast_connection: Any) -> None:
 	raise RuntimeError("Remote party failed to attempt the command socket connection!")
 
 
+def _is_complete_json(data: bytes) -> bool:
+	# A message is always a JSON object - skip parsing fragments that do not end in '}', or re-parsing on
+	# every recv adds up on large responses
+	if not data.rstrip().endswith(b"}"):
+		return False
+	try:
+		json.loads(data.decode("utf-8"))
+	except (json.JSONDecodeError, UnicodeDecodeError):
+		return False
+	return True
+
+
+def _receive_message(self: Any, expected_type: str) -> Any:
+	# Epic's version treats a recv shorter than the buffer as the end - a response TCP splits into several
+	# segments gets cut, and one whose length is a multiple of the buffer blocks on the next recv
+	data = b""
+	while True:
+		part = self._command_channel_socket.recv(_remote_execution.DEFAULT_RECEIVE_BUFFER_SIZE)
+		if not part:
+			break
+		data += part
+		if _is_complete_json(data):
+			break
+	if data:
+		message = _remote_execution._RemoteExecutionMessage(None, None)
+		if message.from_json_bytes(data) and message.passes_receive_filter(self._node_id) and message.type_ == expected_type:
+			return message
+	raise RuntimeError("Remote party failed to send a valid response!")
+
+
 _remote_execution = _load_remote_execution()
 _remote_execution._RemoteExecutionCommandConnection._try_accept = _try_accept
+_remote_execution._RemoteExecutionCommandConnection._receive_message = _receive_message
 RemoteExecution = _remote_execution.RemoteExecution
 RemoteExecutionConfig = _remote_execution.RemoteExecutionConfig
 MODE_EXEC_FILE = _remote_execution.MODE_EXEC_FILE
@@ -831,18 +862,30 @@ def _strip_leading_comments(code: str) -> str:
 	return ""  # all lines are comments/blank
 
 
+# Match the quotes too - templates are read from disk on every call, so editing them would break the script
+# tools of sessions still running an older server.py
+_PLACEHOLDER_RE = re.compile(r"(['\"]?)__([A-Z0-9_]+)__\1")
+
+
+def _placeholder_literal(match: re.Match[str], params: dict[str, Any]) -> str:
+	key = match[2]
+	if key not in params:
+		return match[0]
+	value = params[key]
+	# A quoted slot takes a whole string literal, so values with quotes or backslashes arrive unchanged
+	if match[1]:
+		return repr(value if isinstance(value, str) else str(value))
+	return repr(value) if isinstance(value, str) else str(value)
+
+
 def _render_script(script_name: str, **params: Any) -> str:
 	# Build the code only, without connecting - lets a caller that sends over an already-open connection avoid _run_script_with_params reconnecting
 	script_path = SCRIPTS_DIR / script_name
 	if not script_path.exists():
 		raise FileNotFoundError(f"Script not found: {script_path}")
 	code = script_path.read_text(encoding="utf-8")
-	for key, value in params.items():
-		placeholder = f"__{key}__"
-		if isinstance(value, bool):
-			code = code.replace(placeholder, "True" if value else "False")
-		else:
-			code = code.replace(placeholder, str(value))
+	# Substitute in one pass so a __X__ inside an earlier value is not replaced again by a later key
+	code = _PLACEHOLDER_RE.sub(lambda m: _placeholder_literal(m, params), code)
 	return _strip_leading_comments(code)
 
 
@@ -913,8 +956,8 @@ def _b64(payload: Any) -> str:
 
 
 def _validate_token(value: str, label: str) -> None:
-	"""Reject values that would break naive quoted-placeholder substitution
-	(FKey names, action/backend enums)."""
+	"""Reject quotes, newlines and backslashes in token-shaped inputs
+	(FKey names, action/backend enums) - none are valid in those values."""
 	if any(c in value for c in ("'", '"', "\n", "\r", "\\")):
 		raise ValueError(f"{label} contains unsafe characters: {value!r}")
 

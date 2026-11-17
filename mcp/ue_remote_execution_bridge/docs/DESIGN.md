@@ -28,7 +28,7 @@ Python(MCP) ◄─── reverse TCP connection ──── UE editor
 
 - Python listens on a TCP socket → UE receives the UDP message and connects back over TCP
 - Once connected, Python sends a `run_command` message → UE runs the Python code → returns the result
-- The client is Epic's official `remote_execution.py`, loaded at startup from the engine named by `UE_ENGINE_DIR` instead of being shipped (the file is covered by the Unreal Engine EULA). `server.py` replaces its accept step: 2 attempts of 5 s instead of 6, and a 120 s timeout on the command socket instead of blocking, so a node that never connects back or a hung editor cannot hold the cross-process mutex for long
+- The client is Epic's official `remote_execution.py`, loaded at startup from the engine named by `UE_ENGINE_DIR` instead of being shipped (the file is covered by the Unreal Engine EULA). `server.py` replaces its accept step: 2 attempts of 5 s instead of 6, and a 120 s timeout on the command socket instead of blocking, so a node that never connects back or a hung editor cannot hold the cross-process mutex for long. It also replaces the receive step, which ended a response at the first recv shorter than the buffer: it now reads until the bytes form a complete JSON message, so a large response split over several TCP segments arrives whole
 
 ---
 
