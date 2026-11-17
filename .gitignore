@@ -14,6 +14,7 @@
 
 # MCP server runtime files
 mcp/ue_remote_execution_bridge/src/usage.log
+mcp/ue_remote_execution_bridge/src/usage.log.*.snap.log
 mcp/ue_remote_execution_bridge/src/.sessions/
 
 # IDE and editor directories

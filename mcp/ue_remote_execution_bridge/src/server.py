@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import functools
 import importlib.util
 import json
 import logging
@@ -21,7 +22,9 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any, Callable, Generator
+
+import anyio.to_thread
 
 try:
 	from mcp.server.mcpserver import MCPServer as FastMCP  # mcp 2.x
@@ -264,6 +267,7 @@ _SELECTED_NODE_ID: str | None = None
 # Normalized project_root the pinned node advertised at select_ue_node time (None if it was not visible then).
 _SELECTED_NODE_ROOT: str | None = None
 _SELECTED_NODE_LOCK = threading.Lock()
+_UE_CONNECTION_LOCK = threading.Lock()
 
 
 def _resolve_target_node_id() -> str | None:
@@ -565,7 +569,11 @@ def _ue_connection() -> Generator[RemoteExecution, None, None]:
 	_MUTEX_ACQUIRE_TIMEOUT_MS. Connection is closed when the context exits.
 	"""
 	global _SELECTED_NODE_ID
+	# Calls from the same session queue here without a limit - tools run on worker threads (_offload), and without
+	# this they would hit the mutex limit meant for other sessions. The heartbeat skips this (it keeps its 100 ms yield)
+	_UE_CONNECTION_LOCK.acquire()
 	if not _acquire_ue_mutex(_MUTEX_ACQUIRE_TIMEOUT_MS):
+		_UE_CONNECTION_LOCK.release()
 		raise TimeoutError("UE connection held by another session. Retry shortly.")
 	try:
 		preferred = _resolve_target_node_id()
@@ -593,7 +601,8 @@ def _ue_connection() -> Generator[RemoteExecution, None, None]:
 			)
 			if result is not None:
 				with _SELECTED_NODE_LOCK:
-					if _SELECTED_NODE_ID is not None:
+					# Do not overwrite a pin another thread changed through select_ue_node in the meantime
+					if _SELECTED_NODE_ID == preferred:
 						_SELECTED_NODE_ID = result[1]
 				logging.warning("Pinned node %s vanished (editor restart?) — re-pinned to %s", preferred, result[1])
 				# Treat the pin state as cleared so _assert_workspace below still runs.
@@ -626,6 +635,7 @@ def _ue_connection() -> Generator[RemoteExecution, None, None]:
 				pass
 	finally:
 		_release_ue_mutex()
+		_UE_CONNECTION_LOCK.release()
 
 # ---------------------------------------------------------------------------
 # Core run helper
@@ -665,11 +675,19 @@ def _command_result(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _log_usage(code: str) -> None:
-	try:
-		with _usage_lock, open(USAGE_LOG_PATH, "a", encoding="utf-8") as f:
-			f.write(f"---\n{datetime.now(timezone.utc).isoformat()}\n{code}\n")
-	except Exception:
-		pass
+	entry = f"---\n{datetime.now(timezone.utc).isoformat()}\n{code}\n"
+	# Opening fails with PermissionError at the moment another process's _snapshot_usage_log renames the file - reopen the new usage.log shortly after
+	for attempt in range(_SNAPSHOT_RENAME_RETRIES + 1):
+		try:
+			with _usage_lock, open(USAGE_LOG_PATH, "a", encoding="utf-8") as f:
+				f.write(entry)
+			return
+		except PermissionError:
+			if attempt == _SNAPSHOT_RENAME_RETRIES:
+				return
+			time.sleep(_SNAPSHOT_RENAME_INTERVAL)
+		except Exception:
+			return
 
 
 _API_RE = re.compile(r"unreal\.([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)")
@@ -758,17 +776,54 @@ def _format_table(header_lines: list[str], rows: list[dict[str, Any]]) -> list[s
 	return out
 
 
+_SNAPSHOT_RENAME_RETRIES = 20
+_SNAPSHOT_RENAME_INTERVAL = 0.05
+
+
+def _snapshot_usage_log() -> None:
+	# Rename instead of read-then-clear - while another process has the file open for append, os.replace fails with
+	# PermissionError (open() does not share delete access), and appends after the rename create a new usage.log.
+	# So entries written between reading and clearing are not lost. Opening fails at the instant of the rename -
+	# _log_usage reopens, but a session that has not restarted loses that one entry
+	# Named *.log so a snapshot left behind by a failure stays ignored like usage.log
+	snapshot = USAGE_LOG_PATH.with_name(f"{USAGE_LOG_PATH.name}.{_PID}.{time.time_ns()}.snap.log")
+	for attempt in range(_SNAPSHOT_RENAME_RETRIES + 1):
+		try:
+			with _usage_lock:
+				os.replace(USAGE_LOG_PATH, snapshot)
+			return
+		except FileNotFoundError:
+			return
+		except PermissionError:
+			if attempt == _SNAPSHOT_RENAME_RETRIES:
+				raise
+			time.sleep(_SNAPSHOT_RENAME_INTERVAL)
+
+
 def _update_cheatsheet(dry_run: bool = False) -> dict[str, Any]:
-	"""Merge usage.log delta into CHEATSHEET.md and truncate the log.
+	"""Merge usage.log delta into CHEATSHEET.md and consume the log.
 
 	When dry_run=True, returns the planned delta without modifying any files.
 	"""
-	if not USAGE_LOG_PATH.exists():
+	if not dry_run:
+		_snapshot_usage_log()
+	# Every snapshot left, not just this one - a call that failed before replacing the sheet keeps its snapshot for the next call to merge
+	snapshots = sorted(USAGE_LOG_PATH.parent.glob(f"{USAGE_LOG_PATH.name}.*.snap.log"))
+	texts = [s.read_text(encoding="utf-8") for s in snapshots]
+	if dry_run:
+		try:
+			with _usage_lock:
+				texts.append(USAGE_LOG_PATH.read_text(encoding="utf-8"))
+		except FileNotFoundError:
+			pass
+	if not texts:
 		return {"status": "no-op", "message": "usage.log does not exist."}
-	with _usage_lock:
-		log_text = USAGE_LOG_PATH.read_text(encoding="utf-8")
-	total, delta, min_log_date, max_date = _parse_usage_log(log_text)
+	# Keep the next file's first --- at a line start even when the previous file does not end in a newline
+	total, delta, min_log_date, max_date = _parse_usage_log("\n".join(texts))
 	if total == 0:
+		if not dry_run:
+			for s in snapshots:
+				s.unlink(missing_ok=True)
 		return {"status": "no-op", "message": "usage.log is empty.", "entries_processed": 0}
 
 	# read_bytes (not read_text) so the file's EOL style can be detected and restored on write.
@@ -830,9 +885,15 @@ def _update_cheatsheet(dry_run: bool = False) -> dict[str, Any]:
 		result["status"] = "dry-run"
 		return result
 
-	CHEATSHEET_PATH.write_bytes(new_text.encode("utf-8"))
-	with _usage_lock:
-		USAGE_LOG_PATH.write_text("", encoding="utf-8")
+	# Write to a temp file and swap it in - if the sheet were left half-written, the next call would add the remaining snapshots to it again
+	staged = CHEATSHEET_PATH.with_name(f"{CHEATSHEET_PATH.name}.{_PID}.{time.time_ns()}.tmp")
+	try:
+		staged.write_bytes(new_text.encode("utf-8"))
+		os.replace(staged, CHEATSHEET_PATH)
+	finally:
+		staged.unlink(missing_ok=True)
+	for s in snapshots:
+		s.unlink(missing_ok=True)
 	return result
 
 # ---------------------------------------------------------------------------
@@ -912,10 +973,25 @@ def _script_json(result: dict[str, Any]) -> str:
 
 mcp = FastMCP("ue-remote-execution-bridge")
 
+
+def _offload(fn: Callable[..., Any]) -> Callable[..., Any]:
+	# FastMCP calls sync tools directly on the event loop, so one long call blocks every other request until it ends.
+	# _ue_connection opens only one UE connection at a time, within a session (process lock) and across sessions (Windows mutex).
+	# wraps carries the name and docstring and points __wrapped__ at the original signature, so FastMCP builds the same schema and description
+	@functools.wraps(fn)
+	async def run_in_worker(*args: Any, **kwargs: Any) -> Any:
+		return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+	return run_in_worker
+
+
+def _tool(fn: Callable[..., Any]) -> Callable[..., Any]:
+	# Do not stack @mcp.tool() and @_offload per tool - a tool with the order wrong is registered as the bare function and blocks the loop
+	return mcp.tool()(_offload(fn))
+
 # --- Bridge base tools ---
 
 
-@mcp.tool()
+@_tool
 def run_python(
 	code: str,
 	mode: str = "exec_file",
@@ -948,7 +1024,7 @@ def run_python(
 # --- Script-backed tools (scripts/*.py) ---
 
 
-@mcp.tool()
+@_tool
 def list_scripts() -> str:
 	"""Return the list of available analysis scripts."""
 	scripts = sorted(f.name for f in SCRIPTS_DIR.glob("*.py"))
@@ -969,7 +1045,7 @@ def _validate_token(value: str, label: str) -> None:
 # --- Virtual input (mouse/keyboard) tools ---
 
 
-@mcp.tool()
+@_tool
 def simulate_pointer_input(
 	action: str,
 	position: list[float],
@@ -1056,7 +1132,7 @@ def simulate_pointer_input(
 	)
 
 
-@mcp.tool()
+@_tool
 def simulate_key_input(key: str, action: str, backend: str = "slate") -> str:
 	"""Inject keyboard input into PIE - Backend A (Slate) or B (Viewport) selectable.
 
@@ -1091,7 +1167,7 @@ def simulate_key_input(key: str, action: str, backend: str = "slate") -> str:
 	)
 
 
-@mcp.tool()
+@_tool
 def run_driver_sequence(steps: list[dict[str, Any]], timeout_seconds: float = 10.0) -> str:
 	"""Run a Backend C (AutomationDriver) keyboard sequence asynchronously and wait for it to finish.
 
@@ -1167,7 +1243,7 @@ def run_driver_sequence(steps: list[dict[str, Any]], timeout_seconds: float = 10
 	)
 
 
-@mcp.tool()
+@_tool
 def enable_automation_driver(auto_disable_seconds: float = 30.0) -> str:
 	"""Enable Backend C (AutomationDriver) - reference-counted; real HW input is blocked while enabled.
 
@@ -1185,7 +1261,7 @@ def enable_automation_driver(auto_disable_seconds: float = 30.0) -> str:
 	)
 
 
-@mcp.tool()
+@_tool
 def disable_automation_driver(generation: int = 0) -> str:
 	"""Release one Backend C (AutomationDriver) reference - it is only really disabled once the count reaches 0.
 
@@ -1208,9 +1284,9 @@ def _b64_str(s: str) -> str:
 
 
 
-@mcp.tool()
+@_tool
 def update_cheatsheet(dry_run: bool = False) -> dict[str, Any]:
-	"""Merge src/usage.log delta into docs/CHEATSHEET.md frequency table and truncate the log.
+	"""Merge src/usage.log delta into docs/CHEATSHEET.md frequency table and clear the log.
 
 	Merge rules (matches the procedure documented in CHEATSHEET.md):
 	  - Existing row + delta -> Count accumulates, Last seen overwritten
@@ -1233,7 +1309,7 @@ def update_cheatsheet(dry_run: bool = False) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@_tool
 def list_ue_nodes(discovery_timeout: float = 15.0) -> dict[str, Any]:
 	"""Discover all running Unreal Editor instances and show which one this server is targeting.
 
@@ -1330,7 +1406,7 @@ def list_ue_nodes(discovery_timeout: float = 15.0) -> dict[str, Any]:
 	}
 
 
-@mcp.tool()
+@_tool
 def select_ue_node(node_id: str) -> dict[str, Any]:
 	"""Pin this MCP server session to a specific Unreal Editor instance.
 
@@ -1393,7 +1469,7 @@ def select_ue_node(node_id: str) -> dict[str, Any]:
 	}
 
 
-@mcp.tool()
+@_tool
 def clear_ue_node() -> dict[str, Any]:
 	"""Clear the session node selection, reverting to env-var or workspace-filter routing.
 

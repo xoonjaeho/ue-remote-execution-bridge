@@ -53,7 +53,7 @@ Internal details (session lock, full list of metadata): `docs/DESIGN.md`.
 | Multi-node | `list_ue_nodes` / `select_ue_node` / `clear_ue_node` | Choose an editor instance |
 | Virtual PIE input | `simulate_pointer_input` / `simulate_key_input` | Inject mouse click / drag / long press and key input into PIE (Slate / GameViewportClient backends) |
 | Virtual PIE input | `enable_automation_driver` / `run_driver_sequence` / `disable_automation_driver` | AutomationDriver keyboard sequences (real input is blocked while enabled) |
-| Maintenance | `update_cheatsheet` | Merge the `src/usage.log` delta into `docs/CHEATSHEET.md`, then truncate |
+| Maintenance | `update_cheatsheet` | Merge the `src/usage.log` delta into `docs/CHEATSHEET.md`, then clear the log |
 | Self-check | `list_scripts` | List registered scripts |
 
 For PIE start/stop, Output Log queries, asset search/save/move, and DataTable queries, use the official unreal-mcp toolsets. PIE pause, which the official toolsets lack, is done by sending the console `pause` command through `run_python`.
@@ -95,7 +95,7 @@ Each Claude Code session's MCP server starts independently, so two sessions can 
 
 ## Usage Logging
 
-Code from `run_python` calls is appended in plaintext to `src/usage.log` (do not include secrets). The MCP tool `update_cheatsheet` extracts `unreal.X.Y` symbols, merges them into the `docs/CHEATSHEET.md` frequency table, and truncates the log. Details: `docs/CHEATSHEET.md`.
+Code from `run_python` calls is appended in plaintext to `src/usage.log` (do not include secrets). The MCP tool `update_cheatsheet` extracts `unreal.X.Y` symbols, merges them into the `docs/CHEATSHEET.md` frequency table, and clears the log. Details: `docs/CHEATSHEET.md`.
 
 ---
 

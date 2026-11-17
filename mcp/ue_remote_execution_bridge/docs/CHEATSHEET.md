@@ -11,7 +11,7 @@ Incremental aggregation. The frequency table rows are the accumulated state, and
    - Extracts `unreal.X.Y` patterns with a regex → produces a delta (per-API count + date)
    - Merges into the frequency table (existing rows: accumulate `Count`, update `Last seen` / new API: add a new row with an empty note / existing rows absent from the delta: unchanged)
    - Sorts by Count descending and updates the `Period` line (max date / cumulative entries)
-   - Truncates `src/usage.log` to 0 bytes
+   - Before merging, renames `src/usage.log` to `usage.log.<pid>.<ns>.snap.log` and deletes that snapshot once the sheet is replaced. A snapshot left by a failure is merged by the next call
 3. Fill in the `Notes` column of newly added rows afterwards. If you add a meaningful one-line description, it is preserved from the next run on.
 4. Calling with `dry_run=True` returns the result without modifying any file (for verification).
 

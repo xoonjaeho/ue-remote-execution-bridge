@@ -81,7 +81,7 @@ PIE start/stop, Output Log queries, asset search/save/move, and DataTable querie
 | `list_ue_nodes` | `discovery_timeout: float = 15.0` | List running UE editor instances and show the current target |
 | `select_ue_node` | `node_id: str` | Pin the session to a specific UE editor instance (kept until restart) |
 | `clear_ue_node` | — | Clear the node pin and return to env UE_NODE_ID or workspace-filter auto-selection |
-| `update_cheatsheet` | `dry_run: bool = False` | Merge the `src/usage.log` delta into the `docs/CHEATSHEET.md` frequency table, then truncate (§8) |
+| `update_cheatsheet` | `dry_run: bool = False` | Merge the `src/usage.log` delta into the `docs/CHEATSHEET.md` frequency table, then consume the log (§8) |
 | `simulate_pointer_input` | `action: "click"\|"drag"\|"long_press"`, `position: [x,y]`, `backend: "slate"\|"viewport" = "slate"`, `button: str = "LeftMouseButton"`, `to_position: [x,y]\|None = None`, `hold_seconds: float = 1.0`, `steps: int = 8` | Inject a PIE mouse pointer (Backend A/B). long_press is composed from a Down script → this server process's own sleep(hold_seconds) → an Up script (so the UE game thread never blocks). Coordinates are viewport-local pixels, the same for both backends. Coordinate-based mouse is not supported by Backend C (AutomationDriver) (§9) — use backend='viewport' if needed. JSON click/drag `{success, handled, message}`, long_press `{success, down, up}` |
 | `simulate_key_input` | `key: str`, `action: "down"\|"up"\|"char"\|"focus_viewport"`, `backend: "slate"\|"viewport" = "slate"` | Inject PIE keyboard input (Backend A/B). backend='viewport' does not support action='char' (raw keys only). action='focus_viewport' moves focus to the PIE viewport before injecting gameplay keys (do not call it when typing into a text field — it steals focus). JSON `{success, handled, message}` |
 | `run_driver_sequence` | `steps: list[dict]`, `timeout_seconds: float = 10.0` | Asynchronously kicks off a Backend C (AutomationDriver) keyboard sequence, then waits for completion with a non-blocking poll loop (host-side sleep interval) before returning — to the caller it looks like a synchronous tool. steps actions: press/release/press_chord/type/wait. enable_automation_driver is required beforehand (fails explicitly when disabled, no crash). JSON `{success, handle, done, sequence_success, message}` |
@@ -215,7 +215,7 @@ print(unreal.SystemLibrary.get_engine_version())
 ---
 ```
 
-Aggregation is handled by the MCP tool `update_cheatsheet` — it extracts symbols with the regex `unreal\.[A-Za-z0-9_.]+`, merges them into the `docs/CHEATSHEET.md` frequency table, and truncates `src/usage.log`.
+Aggregation is handled by the MCP tool `update_cheatsheet` — it extracts symbols with the regex `unreal\.[A-Za-z0-9_.]+` and merges them into the `docs/CHEATSHEET.md` frequency table. Instead of reading and then clearing `src/usage.log`, it renames the file to a snapshot, so entries another session writes between the read and the clear are not lost. The sheet is replaced through a temp file, and a snapshot left by a failed replace is merged by the next call.
 
 ---
 
