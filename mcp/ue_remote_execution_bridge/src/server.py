@@ -169,11 +169,15 @@ _START_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _get_git_branch() -> str:
-	"""Read branch name by parsing .git/HEAD directly — no git in PATH required.
+	"""Read branch name by parsing the HEAD file directly — no git in PATH required.
 	Walks upward from server.py location, so CWD/env vars don't affect resolution."""
 	try:
 		for directory in Path(__file__).resolve().parents:
-			head_file = directory / ".git" / "HEAD"
+			git_path = directory / ".git"
+			if git_path.is_file():
+				# In a worktree or submodule .git is a "gitdir: <path>" file; a relative path is relative to that file's directory.
+				git_path = directory / git_path.read_text(encoding="utf-8").strip().removeprefix("gitdir:").strip()
+			head_file = git_path / "HEAD"
 			if head_file.exists():
 				content = head_file.read_text(encoding="utf-8").strip()
 				if content.startswith("ref: refs/heads/"):
