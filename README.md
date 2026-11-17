@@ -70,12 +70,12 @@ Requirements: Windows, Unreal Engine 5.8 (an environment that can build C++ — 
    { "Name": "PythonScriptPlugin", "Enabled": true },
    { "Name": "RemoteExecutionBridge", "Enabled": true }
    ```
-5. **Register the MCP** — Add the following to `mcpServers` in `.mcp.json`. `UE_PROJECT_ROOT` is the path of `PROJECT` relative to the `.mcp.json` folder (`"."` if they are the same folder).
+5. **Register the MCP** — Add the following to `mcpServers` in `.mcp.json`. `UE_PROJECT_ROOT` is the path of `PROJECT` relative to the `.mcp.json` folder (`"."` if they are the same folder). `UE_ENGINE_DIR` is the absolute path of the engine the project opens with, the folder that contains `Engine/`: the server loads Epic's `remote_execution.py` from there. Find it from `EngineAssociation` in the `.uproject` — a version such as `5.8` is a Launcher install, listed under `HKLM\SOFTWARE\EpicGames\Unreal Engine\5.8` (`InstalledDirectory`); any other value is a source build, listed under `HKCU\Software\Epic Games\Unreal Engine\Builds`. Ask the user if neither gives it.
    ```json
    "ue-remote-execution-bridge": {
      "command": "python",
      "args": ["mcp/ue_remote_execution_bridge/src/server.py"],
-     "env": { "UE_PROJECT_ROOT": "." }
+     "env": { "UE_PROJECT_ROOT": ".", "UE_ENGINE_DIR": "C:/Program Files/Epic Games/UE_5.8" }
    }
    ```
 6. **Python dependencies** — `pip install -r mcp/ue_remote_execution_bridge/requirements.txt`
@@ -88,4 +88,4 @@ When asked to turn it off, revert step 5 and the `RemoteExecutionBridge` entry f
 
 ## License
 
-MIT (`LICENSE`). Exception: `mcp/ue_remote_execution_bridge/src/execute.py` is a verbatim copy of Epic's `remote_execution.py` and is governed by the Unreal Engine EULA — see `NOTICE`.
+MIT (`LICENSE`). The server ships no Epic file; it loads `remote_execution.py` from your own engine install at startup.

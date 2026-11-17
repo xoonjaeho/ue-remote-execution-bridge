@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import importlib.util
 import json
 import logging
 import os
 import re
-import sys
+import socket
 import threading
 import time
 from contextlib import contextmanager
@@ -27,16 +28,58 @@ try:
 except ImportError:
 	from mcp.server.fastmcp import FastMCP  # mcp 1.x
 
-sys.path.insert(0, str(Path(__file__).parent))
-from execute import (
-	RemoteExecution,
-	RemoteExecutionConfig,
-	MODE_EXEC_FILE,
-	MODE_EXEC_STATEMENT,
-	MODE_EVAL_STATEMENT,
-)
-
 _log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Epic's remote_execution.py — loaded from the engine, not shipped here: the file
+# is covered by the Unreal Engine EULA.
+# ---------------------------------------------------------------------------
+
+_REMOTE_EXECUTION_SUBPATH = Path("Plugins/Experimental/PythonScriptPlugin/Content/Python/remote_execution.py")
+# Epic's accept loop makes 6 attempts of 5 s, so a node that never connects back
+# holds the cross-process mutex for 30 s.
+_ACCEPT_ATTEMPTS = 2
+# Epic leaves the command socket blocking; a hung editor would hold the mutex forever.
+_COMMAND_SOCKET_TIMEOUT_S = 120
+
+
+def _load_remote_execution() -> Any:
+	env = os.environ.get("UE_ENGINE_DIR")
+	if not env:
+		raise RuntimeError(
+			"UE_ENGINE_DIR is not set. Set it in .mcp.json to the engine install folder "
+			"(the one that contains Engine/, e.g. C:/Program Files/Epic Games/UE_5.8)."
+		)
+	candidates = [Path(env) / "Engine" / _REMOTE_EXECUTION_SUBPATH, Path(env) / _REMOTE_EXECUTION_SUBPATH]
+	path = next((p for p in candidates if p.is_file()), None)
+	if path is None:
+		raise RuntimeError(f"remote_execution.py not found under UE_ENGINE_DIR: {candidates[0]}")
+	spec = importlib.util.spec_from_file_location("ue_remote_execution", path)
+	module = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(module)
+	return module
+
+
+def _try_accept(self: Any, broadcast_connection: Any) -> None:
+	for _ in range(_ACCEPT_ATTEMPTS):
+		broadcast_connection.broadcast_open_connection(self._remote_node_id)
+		try:
+			channel, _address = self._command_listen_socket.accept()
+		except socket.timeout:
+			continue
+		channel.settimeout(_COMMAND_SOCKET_TIMEOUT_S)
+		self._command_channel_socket = channel
+		return
+	raise RuntimeError("Remote party failed to attempt the command socket connection!")
+
+
+_remote_execution = _load_remote_execution()
+_remote_execution._RemoteExecutionCommandConnection._try_accept = _try_accept
+RemoteExecution = _remote_execution.RemoteExecution
+RemoteExecutionConfig = _remote_execution.RemoteExecutionConfig
+MODE_EXEC_FILE = _remote_execution.MODE_EXEC_FILE
+MODE_EXEC_STATEMENT = _remote_execution.MODE_EXEC_STATEMENT
+MODE_EVAL_STATEMENT = _remote_execution.MODE_EVAL_STATEMENT
 
 # ---------------------------------------------------------------------------
 # Paths

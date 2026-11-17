@@ -6,7 +6,8 @@
         "mcp/ue_remote_execution_bridge/src/server.py"
       ],
       "env": {
-        "UE_PROJECT_ROOT": "."
+        "UE_PROJECT_ROOT": ".",
+        "UE_ENGINE_DIR": "C:/Program Files/Epic Games/UE_5.8"
       }
     }
   }

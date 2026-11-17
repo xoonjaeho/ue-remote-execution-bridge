@@ -16,7 +16,6 @@ An MCP server that runs arbitrary Python inside the UE editor from Claude Code v
 | Path | Role |
 |---|---|
 | `src/server.py` | MCP server — tool definitions, connection lifecycle, heartbeat |
-| `src/execute.py` | Verbatim copy of Epic's `remote_execution.py` (UDP discovery + TCP command client) |
 | `scripts/*.py` | Scripts that dedicated tools run inside the editor (list them with `list_scripts`) |
 | `docs/DESIGN.md` | Protocol, architecture, ADR, UFUNCTION catalog |
 | `docs/CHEATSHEET.md` | API frequency table and common snippets (updated by `update_cheatsheet`) |
@@ -29,6 +28,7 @@ An MCP server that runs arbitrary Python inside the UE editor from Claude Code v
 | Variable | Default | Description |
 |------|--------|------|
 | `UE_PROJECT_ROOT` | unset (no workspace filter) | The folder with the `*.uproject`, relative to `.mcp.json` (e.g. `.`, `Client`). **With multiple editors, command routing is scoped to the editor whose project_root matches this** (workspace isolation). If unset there is no workspace filter: calls route to the single visible editor, and the server refuses to guess when several editors are visible (set this variable or use `select_ue_node()`) |
+| `UE_ENGINE_DIR` | — (required) | Absolute path of the engine install, the folder that contains `Engine/`. The server loads Epic's `remote_execution.py` (UDP discovery + TCP command client) from `Engine/Plugins/Experimental/PythonScriptPlugin/Content/Python/` there and fails at startup if it is missing |
 | `UE_NODE_ID` | — | Default node_id to connect to when multiple editors are running (takes precedence over the project_root filter) |
 
 After editing `.mcp.json`, restart Claude Code or reload with `/mcp`.
